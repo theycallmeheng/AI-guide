@@ -1,0 +1,2 @@
+# Optional VieNeu CPU ONNX runtime.
+vieneu==3.8.3

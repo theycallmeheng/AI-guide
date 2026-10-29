@@ -1,0 +1,31 @@
+path: /kaggle/input/datasets/abtinzandi/obstacle-detection-dataset/ROD-Dataset/dataset
+train: train/images
+val: valid/images
+test: test/images
+nc: 25
+names:
+- Bike
+- Building
+- Car
+- Person
+- Stairs
+- Traffic sign
+- Electrical Pole
+- Road
+- Motorcycle
+- Dustbin
+- Dog
+- Manhole
+- Tree
+- Guard rail
+- Pedestrian crosswalk
+- Truck
+- Bus
+- Bench
+- Traffic Cone
+- Fire hydrant
+- Teraffic Barrel
+- Plant Pot
+- Electrical Box
+- Chair
+- Bicycle Rack
