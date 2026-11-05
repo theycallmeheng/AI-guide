@@ -30,6 +30,7 @@ models/*.engine
 *.safetensors
 *.pth
 !models/results/best.pt
+!models/results/yolo26n_best.pt
 models/results/__results___files/
 models/results/weights/
 models/results/runs/**/weights/

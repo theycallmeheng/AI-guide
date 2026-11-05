@@ -1,0 +1,14 @@
+model: yolo26n
+weights: /kaggle/working/runs/rod_yolo26n/weights/best.pt
+timestamp: 2026-10-29T07:24:52
+epochs: 100
+imgsz: 640
+batch: 128
+params: 2545550
+mAP50_95: 0.7499622619110587
+mAP50: 0.8870478206550761
+precision: 0.908889295723775
+recall: 0.8982255688291159
+avg_ms_per_img: 9.881
+fps: 101.21
+test_images: 1629
