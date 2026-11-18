@@ -63,7 +63,7 @@ class PerceptionTests(unittest.TestCase):
         self.assertEqual(decision.action,"unclear")
 
     def test_side_suggestion_requires_stable_walkway_mask(self):
-        policy=AlertPolicy()
+        policy=AlertPolicy(allow_routes=True)
         scene=analysis([obstacle()],clear=("bên trái",))
         self.assertEqual(policy.update(scene,{},0)[0].action,"stop")
         self.assertEqual(policy.update(scene,{},.9)[0].action,"stop")
@@ -73,7 +73,7 @@ class PerceptionTests(unittest.TestCase):
 
     def test_direction_precedes_obstacle_only_with_stable_walkway(self):
         for side,command in (("bên trái","Rẽ trái"),("bên phải","Rẽ phải")):
-            policy=AlertPolicy()
+            policy=AlertPolicy(allow_routes=True)
             scene=analysis([obstacle()],clear=(side,))
             first,_=policy.update(scene,VIETNAMESE_NAMES,0)
             self.assertEqual(first.action,"stop")
@@ -81,6 +81,7 @@ class PerceptionTests(unittest.TestCase):
             self.assertTrue(routed.message.startswith("Dừng lại. "+command))
             self.assertLess(routed.message.index(command),routed.message.index("Có người"))
         policy=AlertPolicy()
+        policy=AlertPolicy(allow_routes=True)
         scene=analysis([obstacle(box=(0,40,20,99),direction="bên trái")],clear=("phía trước",))
         first,_=policy.update(scene,VIETNAMESE_NAMES,0)
         self.assertTrue(first.message.startswith("Đi chậm lại."))

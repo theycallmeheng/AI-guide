@@ -10,14 +10,20 @@ import time
 from urllib.parse import urlsplit
 import cv2
 import numpy as np
-from pipeline import APP_DIR, GuidePipeline, PipelineConfig, default_model
+from pipeline import APP_DIR, GuidePipeline, PipelineConfig, available_core_profiles, default_model
 
 def options():
     models = sorted(set([p for pattern in ("*.pt", "models/**/*.pt", "models/**/*.onnx") for p in APP_DIR.glob(pattern)]))
-    models = [p for p in models if p.suffix == ".onnx" or p.name in {"best.pt", "walkway_obstacles.pt", "yolo11n.pt", "yolov8n.pt"}]
+    models = [p for p in models if p.suffix == ".onnx" or p.name in {"best.pt", "yolo26n_best.pt", "walkway_obstacles.pt", "yolo11n.pt", "yolov8n.pt"}]
     videos = sorted(p for p in (APP_DIR/"data/videos").rglob("*") if p.suffix.lower() in {".mp4", ".mov", ".avi", ".mkv"})
-    return {"models": [str(p.relative_to(APP_DIR)) for p in models], "videos": [str(p.relative_to(APP_DIR)) for p in videos],
-            "default_model": str(default_model().relative_to(APP_DIR))}
+    profiles = available_core_profiles()
+    return {
+        "models": [str(p.relative_to(APP_DIR)) for p in models],
+        "videos": [str(p.relative_to(APP_DIR)) for p in videos],
+        "default_model": str(default_model().relative_to(APP_DIR)),
+        "profiles": [{"id": k, "label": str(v["label"])} for k, v in profiles.items()],
+        "default_profile": next(iter(profiles.keys())),
+    }
 
 class GuideServer(ThreadingHTTPServer):
     daemon_threads = True
@@ -34,7 +40,8 @@ class GuideServer(ThreadingHTTPServer):
         key = frame_id if packet is not None else -1
         with self.jpeg_lock:
             if key != self.jpeg_key:
-                frame = packet["analysis"].frame if packet else np.full((360, 640, 3), (42, 30, 16), dtype=np.uint8)
+                from obstacle_detector import render_analysis
+                frame = render_analysis(packet["analysis"]) if packet else np.full((360, 640, 3), (42, 30, 16), dtype=np.uint8)
                 if frame.shape[1] > 960:
                     frame = cv2.resize(frame, (960, round(frame.shape[0]*960/frame.shape[1])))
                 ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -92,8 +99,16 @@ class Handler(BaseHTTPRequestHandler):
             pipe = self.server.pipeline
             if self.path == "/api/start":
                 choices = options()
-                model = body.get("model", "")
-                if model not in choices["models"]: raise ValueError("Chọn mô hình trong danh sách.")
+                profiles_map = available_core_profiles()
+                profile_id = body.get("profile")
+                core_cfg = None
+                if profile_id is not None:
+                    if profile_id not in profiles_map:
+                        raise ValueError("Chế độ lõi AI không hợp lệ.")
+                    core_cfg = profiles_map[profile_id]["path"]
+                model = body.get("model", choices["default_model"])
+                if not core_cfg and model not in choices["models"]:
+                    raise ValueError("Chọn mô hình trong danh sách.")
                 mode = body.get("mode", "camera")
                 source = body.get("source", 0)
                 if mode == "camera": source = int(source)
@@ -101,11 +116,22 @@ class Handler(BaseHTTPRequestHandler):
                     if source not in choices["videos"]: raise ValueError("Chọn video trong data/videos.")
                     source = str(APP_DIR/source)
                 elif mode != "ip": raise ValueError("Nguồn không hợp lệ.")
-                pipe.start(PipelineConfig(source=source, model=str(APP_DIR/model), confidence=float(body.get("confidence", .3)),
-                                          imgsz=int(body.get("imgsz", 480)), live_stream=mode == "ip"))
+                env = str(body.get("environment", "alley"))
+                if env not in {"alley", "sidewalk", "indoor"}:
+                    raise ValueError("Bối cảnh không hợp lệ.")
+                pipe.start(PipelineConfig(
+                    source=source,
+                    model=str(APP_DIR/model) if model in choices["models"] else str(default_model()),
+                    confidence=float(body.get("confidence", .3)),
+                    imgsz=int(body.get("imgsz", 480)),
+                    live_stream=mode == "ip",
+                    core_config=str(core_cfg) if core_cfg else None,
+                    environment=env,
+                    mirror_input=bool(body.get("mirror_input", False)),
+                ))
             elif self.path == "/api/stop": pipe.stop()
-            elif self.path == "/api/voice": pipe.speech.speak("Dừng lại.", priority=3, clip="stop", max_age=10)
-            elif self.path == "/api/sound": pipe.speech.set_enabled(bool(body.get("enabled", True)))
+            elif self.path == "/api/voice": pipe.test_alert()
+            elif self.path == "/api/sound": pipe.set_sound_enabled(bool(body.get("enabled", True)))
             else: return self.reply(404, {"error": "Không tìm thấy."})
             self.reply(200, {"ok": True})
         except (ValueError, RuntimeError, TypeError) as exc:

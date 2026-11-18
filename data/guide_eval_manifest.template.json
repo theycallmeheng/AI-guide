@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "split": "validation",
+  "items": [
+    {
+      "annotations": "events/route_01.events.json",
+      "run": "../runs/guide_v2/validation_route_01"
+    },
+    {
+      "annotations": "events/route_02.events.json",
+      "run": "../runs/guide_v2/validation_route_02"
+    }
+  ]
+}

@@ -21,6 +21,7 @@ def main():
     p.add_argument("--samples", type=int, default=60)
     p.add_argument("--device", default="cpu")
     p.add_argument("--threads", type=int, default=8)
+    p.add_argument("--no-render", action="store_true", help="Measure detection before UI drawing, as used by live runtime")
     p.add_argument("--output", type=Path, default=APP_DIR/"reports/runtime_benchmark.json")
     args = p.parse_args()
     if args.samples < 1: p.error("--samples must be positive")
@@ -36,7 +37,7 @@ def main():
             try:
                 ok, frame = cap.read()
                 if not ok: raise ValueError("Cannot read source video")
-                for _ in range(3): analyze_frame(frame, model, .3, size, args.device)
+                for _ in range(3): analyze_frame(frame, model, .3, size, args.device, render=not args.no_render)
                 torch.set_num_threads(args.threads)  # Ultralytics setup may override the initial value.
                 for _ in range(args.samples):
                     t = time.perf_counter()
@@ -44,7 +45,7 @@ def main():
                     if not ok: break
                     decode.append((time.perf_counter()-t)*1000)
                     t = time.perf_counter()
-                    analyze_frame(frame, model, .3, size, args.device)
+                    analyze_frame(frame, model, .3, size, args.device, render=not args.no_render)
                     timings.append((time.perf_counter()-t)*1000)
             finally: cap.release()
             if not timings: raise ValueError("Video has no frames after warmup")
@@ -57,7 +58,8 @@ def main():
             print(json.dumps(row), flush=True)
     report = {"hardware": {"cpu": platform.processor(), "logical_cores": os.cpu_count(),
                           "torch": torch.__version__, "cuda": torch.cuda.is_available(), "device": args.device, "threads": args.threads},
-              "method": "3 warmups; same contiguous frames; annotations included; camera transport, display and speech excluded",
+              "method": "3 warmups; same contiguous frames; camera transport, display and speech excluded",
+              "annotations_included": not args.no_render,
               "results": rows}
     args.output.parent.mkdir(exist_ok=True, parents=True)
     args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")

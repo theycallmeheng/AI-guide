@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import threading
 import time
+from collections import deque
 from urllib.parse import urlsplit
 
 from feedback import SpeechWorker
@@ -19,6 +20,41 @@ def default_model():
                             APP_DIR/"models/yolo11n.pt", APP_DIR/"yolo11n.pt") if p.is_file()),
                 APP_DIR/"models/yolo11n.pt")
 
+def default_segformer_model():
+    path = APP_DIR/"models/segformer_sidewalk"
+    if (path/"config.json").is_file() and any(
+        (path/name).is_file() for name in ("model.safetensors", "pytorch_model.bin")
+    ):
+        return str(path)
+    return ""
+
+def available_core_profiles() -> dict[str, dict[str, str | None]]:
+    profiles: dict[str, dict[str, str | None]] = {}
+    ov_igpu = APP_DIR/"configs/guide_openvino_igpu.json"
+    ov_int8 = APP_DIR/"configs/guide_openvino_int8.json"
+    ov_ready = (APP_DIR/"models/openvino/export_manifest.json").is_file()
+    if ov_ready and ov_igpu.is_file():
+        profiles["openvino_igpu"] = {
+            "label": "Guide v3 OpenVINO (P-core + Iris Xe iGPU)",
+            "path": str(ov_igpu),
+        }
+    if ov_ready and ov_int8.is_file():
+        profiles["openvino_int8"] = {
+            "label": "Guide v3 OpenVINO Full INT8 (Siêu nhanh)",
+            "path": str(ov_int8),
+        }
+    opt_pt = APP_DIR/"configs/guide_optimized.json"
+    if opt_pt.is_file():
+        profiles["pytorch_v3"] = {
+            "label": "Guide v3 PyTorch (Đa mô hình 3D)",
+            "path": str(opt_pt),
+        }
+    profiles["legacy_v1"] = {
+        "label": "Cơ bản V1 (Đối chiếu cũ)",
+        "path": None,
+    }
+    return profiles
+
 @dataclass(frozen=True)
 class PipelineConfig:
     source: int | str = 0
@@ -27,14 +63,32 @@ class PipelineConfig:
     imgsz: int = 480
     live_stream: bool = False
     device: str | None = None
+    segformer_model: str | None = default_segformer_model()
+    allow_routes: bool = False
+    core_config: str | None = None
+    environment: str = "alley"
+    mirror_input: bool = False
 
     def validate(self):
         if self.imgsz not in (320, 480, 640):
             raise ValueError("Chọn kích thước suy luận 320, 480 hoặc 640.")
         if not .1 <= self.confidence <= .9:
             raise ValueError("Độ tin cậy phải từ 0.1 đến 0.9.")
-        if not Path(self.model).exists():
-            raise ValueError("Không tìm thấy mô hình cục bộ. Chọn best.pt hoặc mô hình ONNX đã xuất.")
+        if self.core_config:
+            core_path = Path(self.core_config).resolve()
+            if not core_path.is_relative_to(APP_DIR.resolve()) or not core_path.is_file():
+                raise ValueError("Không tìm thấy cấu hình lõi Guide v3 hợp lệ trong dự án.")
+            if self.environment not in {"sidewalk", "alley", "indoor"}:
+                raise ValueError("Bối cảnh phải là sidewalk, alley hoặc indoor.")
+        else:
+            if not Path(self.model).exists():
+                raise ValueError("Không tìm thấy mô hình cục bộ. Chọn best.pt hoặc mô hình ONNX đã xuất.")
+            if self.segformer_model:
+                segmenter = Path(self.segformer_model)
+                if not (segmenter/"config.json").is_file() or not any(
+                    (segmenter/name).is_file() for name in ("model.safetensors", "pytorch_model.bin")
+                ):
+                    raise ValueError("Thư mục SegFormer cần có config.json và model.safetensors hoặc pytorch_model.bin.")
         if isinstance(self.source, bool) or not isinstance(self.source, (str, int)):
             raise ValueError("Nguồn camera không hợp lệ.")
         if isinstance(self.source, int):
@@ -48,6 +102,7 @@ class PipelineConfig:
             raise ValueError("Không tìm thấy video đã chọn.")
 
 class SilentSpeech:
+    def observe(self, *args, **kwargs): pass
     def speak(self, *args, **kwargs): pass
     def cancel(self): pass
     def clear_pending(self): pass
@@ -63,6 +118,8 @@ class GuidePipeline:
                        "running": False, "metrics": {}, "report": None}
         self._frame = None
         self._frame_id = 0
+        self.audio_events = deque(maxlen=10000)
+        self._session_clock = time.perf_counter()
         self._supervisor = None
         self.stop_event = threading.Event()
         self.latest = None
@@ -70,7 +127,22 @@ class GuidePipeline:
         self.capture = None
         self.audio_stats = Measurements()
         self.dispatch_stats = Measurements()
+        self.idle_audio_stats = Measurements()
+        self.queue_stats = Measurements()
+        self._sound_enabled = bool(speech)
         self.speech = SpeechWorker(self, engine) if speech else SilentSpeech()
+
+    def set_sound_enabled(self, enabled: bool):
+        self._sound_enabled = bool(enabled)
+        self.speech.set_enabled(enabled)
+        if self.inference is not None and hasattr(self.inference, "set_sound_enabled"):
+            self.inference.set_sound_enabled(enabled)
+
+    def test_alert(self):
+        if self.inference is not None and self.inference.is_alive() and hasattr(self.inference, "test_speak_stop"):
+            self.inference.test_speak_stop()
+        else:
+            self.speech.speak("Dừng lại.", priority=3, clip="stop", max_age=10)
 
     def put(self, event):
         kind = event["type"]
@@ -81,11 +153,19 @@ class GuidePipeline:
                 # Drop frames completed after Stop or source failure.
                 if self.stop_event.is_set():
                     return
+                if hasattr(self.speech, "observe"):
+                    self.speech.observe(event["guidance"].key, event["captured_at"], event["guidance"].priority)
                 self._frame = event
                 self._frame_id += 1
                 self._state.update(guidance=event["guidance"].message, action=event["guidance"].action,
                                    status="Đang nhận diện • chưa rõ" if event["analysis"].unclear else "Đang nhận diện")
             elif kind == "feedback_latency":
+                self.audio_events.append(dict(event, time_s=time.perf_counter()-self._session_clock))
+                self.queue_stats.add(event.get('queue_wait_ms', 0))
+                if not event.get('queued_behind_active', False):
+                    self.idle_audio_stats.add(event['latency_ms'])
+                self._state['metrics'].update(p95_idle_audio_submit_ms=self.idle_audio_stats.snapshot()['p95_ms'],
+                                             p95_audio_queue_wait_ms=self.queue_stats.snapshot()['p95_ms'])
                 self.audio_stats.add(event["latency_ms"])
                 stats = self.audio_stats.snapshot()
                 self.dispatch_stats.add(event.get("dispatch_ms",0))
@@ -98,7 +178,7 @@ class GuidePipeline:
                 self._state["metrics"].update({k: v for k, v in event.items() if k != "type"})
             elif kind == "analysis_stale":
                 self._frame = None
-                self._state.update(status="AI đang xử lý quá chậm. Thử ảnh 320 hoặc dừng tác vụ khác.",
+                self._state.update(status="AI đang xử lý quá chậm. Khung xem là video gốc; chưa đủ kết quả để chỉ dẫn. Tạm tắt SegFormer hoặc dùng GPU.",
                                    guidance="Chưa có kết quả đủ mới để chỉ dẫn.", action="unavailable")
                 self.speech.clear_pending()
             elif kind == "camera_info":
@@ -127,6 +207,12 @@ class GuidePipeline:
         with self._lock:
             return self._frame_id, self._frame
 
+    def latest_preview(self):
+        latest = self.latest
+        if latest is None or self.stop_event.is_set():
+            return None
+        return latest.preview_snapshot()
+
     def is_running(self):
         return any(worker is not None and worker.is_alive() for worker in (self._supervisor, self.capture, self.inference))
 
@@ -147,14 +233,28 @@ class GuidePipeline:
             self.stop_event = threading.Event()
             self.latest = LatestFrame()
             self.audio_stats = Measurements()
+            self.idle_audio_stats = Measurements()
+            self.queue_stats = Measurements()
+            self.audio_events.clear()
+            self._session_clock = time.perf_counter()
             self.dispatch_stats = Measurements()
             with self._lock:
                 self._frame = None
                 self._state.update(status="Đang nạp và làm nóng mô hình…", guidance="Đang chờ hình ảnh mới.",
                                    action="observe", running=True, metrics={}, report=None)
             ready = threading.Event()
-            self.inference = InferenceWorker(config.model, config.confidence, self.latest, self.stop_event,
-                                             self, self, config.imgsz, config.device, ready)
+            if config.core_config:
+                from guide_core.live import CoreInferenceWorker
+                self.inference = CoreInferenceWorker(
+                    config.core_config, self.latest, self.stop_event, self, APP_DIR,
+                    confidence=config.confidence, imgsz=config.imgsz,
+                    environment=config.environment, mirror_input=config.mirror_input,
+                    sound_enabled=self._sound_enabled, ready_event=ready,
+                )
+            else:
+                self.inference = InferenceWorker(config.model, config.confidence, self.latest, self.stop_event,
+                                                 self, self, config.imgsz, config.device, ready,
+                                                 config.segformer_model, config.allow_routes)
             self.capture = CameraCapture(config.source, self.latest, self.stop_event, self, config.live_stream)
             self._supervisor = threading.Thread(target=self._run, args=(ready,), name="guide-session", daemon=True)
             self._supervisor.start()
@@ -178,7 +278,7 @@ class GuidePipeline:
                     break
                 _, _, _, captured_at = self.latest.next_after(-1, timeout=0)
                 age = time.perf_counter() - (captured_at or captured_started)
-                if age > 1.5 and not stale_alert:
+                if age > .7 and not stale_alert:
                     stale_alert = True
                     with self._lock:
                         self._frame = None
@@ -198,11 +298,18 @@ class GuidePipeline:
             self.inference.join(timeout=10)
             report = {"started_at": started_at, "duration_s": round(time.perf_counter()-started, 2),
                       "imgsz": self.config.imgsz, "model": Path(self.config.model).name,
+                      "core_config": Path(self.config.core_config).name if self.config.core_config else None,
+                      "environment": self.config.environment if self.config.core_config else None,
+                      "segformer_model": Path(self.config.segformer_model).name if self.config.segformer_model else None,
+                      "route_guidance_enabled": self.config.allow_routes,
                       "source_type": "camera" if isinstance(self.config.source, int) else "ip" if self.config.live_stream else "video",
                       "metrics_window": "last 2048 latency samples; FPS from last 2 seconds",
                       "audio_latency": "software playback submission; hardware onset not measured",
                       "measurement_origin": "frame decoded on laptop; transport/decoder delay is not measured",
-                      "metrics": self.snapshot()["metrics"]}
+                      "metrics": self.snapshot()["metrics"],
+                      "audio_events": list(self.audio_events),
+                      "audio_event_clock": "seconds since session start, not video presentation timestamps; align before event scoring",
+                      "audio_event_capacity": 10000}
             destination = APP_DIR/"reports"/("session_"+datetime.now().strftime("%Y%m%d_%H%M%S_%f")+".json")
             try:
                 destination.parent.mkdir(exist_ok=True)

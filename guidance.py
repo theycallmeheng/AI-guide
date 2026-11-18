@@ -35,7 +35,8 @@ def describe(analysis, names):
 
 
 class AlertPolicy:
-    def __init__(self):
+    def __init__(self, allow_routes=False):
+        self.allow_routes = allow_routes
         self.candidate = None
         self.candidate_since = 0.0
         self.last_key = None
@@ -49,7 +50,7 @@ class AlertPolicy:
     def update(self, analysis, names, now):
         base = describe(analysis, names)
         # Only real, connected walkway segmentation may supply a route candidate.
-        clear = getattr(analysis, "clear_corridors", ())
+        clear = getattr(analysis, "clear_corridors", ()) if self.allow_routes else ()
         route = next((c for c in ("bên trái", "bên phải") if c in clear), None) if base.action == "stop" else ("phía trước" if "phía trước" in clear else None)
         if analysis.unclear:
             route = None

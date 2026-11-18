@@ -1,0 +1,13 @@
+# Install into an environment with a working PyTorch/CUDA first. Do not replace Kaggle torch.
+# Versions verified by the local adapter smoke test; Kaggle must run its compatibility cell.
+ultralytics==8.4.178
+transformers==5.20.0
+opencv-python==4.14.0.94
+imageio-ffmpeg==0.6.0
+lap>=0.5.12,<0.6
+Pillow>=10
+numpy>=1.26
+psutil>=5.9
+huggingface-hub>=1
+safetensors>=0.4
+

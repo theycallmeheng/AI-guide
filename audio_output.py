@@ -11,9 +11,10 @@ RATE = 24000
 @dataclass(frozen=True)
 class Audio:
     pcm: bytes
+    channels: int = 1
     @property
     def duration(self):
-        return len(self.pcm) / (RATE * 2)
+        return len(self.pcm) / (RATE * 2 * max(1, self.channels))
 
 def read_audio(path):
     with wave.open(str(path), "rb") as wav:
@@ -45,9 +46,12 @@ def save_audio(audio, path):
 class WaveOutput:
     """One waveOut device for the worker lifetime. Buffers stay alive until unprepared."""
     name = "Windows PCM persistent"
-    def __init__(self):
+    def __init__(self, channels=1):
         if os.name != "nt":
             raise RuntimeError("WaveOutput requires Windows.")
+        self.channels = int(channels)
+        if self.channels not in (1, 2):
+            raise ValueError("WaveOutput supports 1 (mono) or 2 (stereo) channels.")
         class Format(ct.Structure):
             _pack_ = 1
             _fields_ = [("tag",ct.c_uint16),("channels",ct.c_uint16),("rate",ct.c_uint32),
@@ -68,7 +72,8 @@ class WaveOutput:
             getattr(self.api,name).argtypes = [ct.c_void_p]
         for name in ("waveOutOpen","waveOutPrepareHeader","waveOutUnprepareHeader","waveOutWrite","waveOutReset","waveOutClose"):
             getattr(self.api,name).restype = ct.c_uint32
-        fmt = Format(1, 1, RATE, RATE*2, 2, 16, 0)
+        align = 2 * self.channels
+        fmt = Format(1, self.channels, RATE, RATE * align, align, 16, 0)
         self._check(self.api.waveOutOpen(ct.byref(self.handle),0xffffffff,ct.byref(fmt),0,0,0))
 
     @staticmethod
@@ -105,11 +110,15 @@ class WaveOutput:
 
 class PortableOutput:
     name = "sounddevice"
-    def __init__(self):
+    def __init__(self, channels=1):
         import sounddevice
         self.sd = sounddevice
+        self.channels = int(channels)
     def play(self,audio):
-        self.sd.play(np.frombuffer(audio.pcm,dtype="<i2"), RATE)
+        arr = np.frombuffer(audio.pcm,dtype="<i2")
+        if self.channels == 2:
+            arr = arr.reshape(-1, 2)
+        self.sd.play(arr, RATE)
     def busy(self):
         return self.sd.get_stream().active
     def stop(self):
@@ -117,5 +126,5 @@ class PortableOutput:
     def close(self):
         self.stop()
 
-def create_output():
-    return WaveOutput() if os.name == "nt" else PortableOutput()
+def create_output(channels=1):
+    return WaveOutput(channels=channels) if os.name == "nt" else PortableOutput(channels=channels)

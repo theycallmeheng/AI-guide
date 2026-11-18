@@ -1,0 +1,4 @@
+# Optional Intel CPU P-cores + Intel Iris Xe iGPU acceleration backend (FP16 / INT8).
+# Install with constraints protecting existing torch/transformers versions.
+openvino>=2024.4
+nncf>=2.13

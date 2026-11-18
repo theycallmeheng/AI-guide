@@ -1,6 +1,7 @@
 opencv-python>=4.9,<5
 Pillow>=10,<13
 ultralytics>=8.3,<9
+transformers==5.20.0
 winrt-runtime>=3.2,<4; platform_system == "Windows"
 winrt-Windows.Foundation>=3.2,<4; platform_system == "Windows"
 winrt-Windows.Foundation.Collections>=3.2,<4; platform_system == "Windows"

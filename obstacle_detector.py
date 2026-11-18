@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import json
+from pathlib import Path
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from temporal_tracking import TemporalTracker
 from functools import lru_cache
 from typing import Any
 
@@ -103,6 +106,8 @@ class Obstacle:
     distance_band: str
     box: tuple[int, int, int, int]
     distance_m: float | None = None  # RGB sources never provide a measured distance.
+    track_id: int | None = None
+    observed_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +118,9 @@ class FrameAnalysis:
     unclear_reason: str
     blur_score: float
     clear_corridors: tuple[str, ...] = ()
+    captured_at: float | None = None
+    inferred_at: float | None = None
+    walkable_mask: np.ndarray | None = None
 
 
 @lru_cache(maxsize=8)
@@ -205,6 +213,13 @@ class LatestFrame:
                 return sequence, None, self._closed, self._captured_at
             return self._sequence, self._frame, self._closed, self._captured_at
 
+    def preview_snapshot(self) -> tuple[int, np.ndarray, float] | None:
+        """Copy the newest raw frame for the UI without waiting for AI inference."""
+        with self._condition:
+            if self._frame is None or self._closed:
+                return None
+            return self._sequence, self._frame.copy(), self._captured_at
+
     def close(self) -> None:
         with self._condition:
             self._closed = True
@@ -248,9 +263,11 @@ def _direction(center_x: float, width: int) -> str:
     return "phía trước"
 
 
-def _relative_band(box_height: int, box_bottom: int, frame_height: int) -> str:
+def _relative_band(box_height: int, box_bottom: int, frame_height: int, overhanging: bool = False) -> str:
     height_ratio = box_height / max(frame_height, 1)
     bottom_ratio = box_bottom / max(frame_height, 1)
+    if overhanging:
+        return "gần" if height_ratio >= 0.36 else "vừa"
     if height_ratio >= 0.40 or (height_ratio >= 0.27 and bottom_ratio >= 0.92):
         return "gần"
     if height_ratio >= 0.17 or bottom_ratio >= 0.80:
@@ -271,7 +288,8 @@ def _image_quality(frame: np.ndarray) -> tuple[float, str]:
 
 
 def analyze_frame(frame: np.ndarray, model: Any, confidence: float, imgsz: int = 640,
-                  device: str | None = None) -> FrameAnalysis:
+                  device: str | None = None, render: bool = True,
+                  walkable_mask: np.ndarray | None = None) -> FrameAnalysis:
     """Detect likely walkway hazards and draw them on a copy of the input frame.
 
     Distance bands are based only on apparent box size and image position. They are
@@ -279,10 +297,25 @@ def analyze_frame(frame: np.ndarray, model: Any, confidence: float, imgsz: int =
     """
     # Do not run full-resolution Pillow/Laplacian/mask work on 4K phone video.
     # YOLO resizes to imgsz internally; retaining 960px is enough for the preview.
+    source_shape = frame.shape[:2]
     if max(frame.shape[:2]) > 960:
         scale = 960 / max(frame.shape[:2])
         frame = cv2.resize(frame, (round(frame.shape[1]*scale), round(frame.shape[0]*scale)), interpolation=cv2.INTER_AREA)
     height, width = frame.shape[:2]
+    if walkable_mask is not None:
+        if walkable_mask.shape[:2] != source_shape:
+            walkable_mask = cv2.resize(
+                walkable_mask.astype(np.uint8),
+                (source_shape[1], source_shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
+        if source_shape != (height, width):
+            walkable_mask = cv2.resize(
+                walkable_mask.astype(np.uint8), (width, height), interpolation=cv2.INTER_NEAREST
+            )
+        walkway = (walkable_mask > 0).astype(np.uint8)
+    else:
+        walkway = np.zeros((height, width), dtype=np.uint8)
     blur_score, quality_reason = _image_quality(frame)
     prediction_floor = max(0.08, confidence - 0.15)
     result = model.predict(
@@ -297,13 +330,12 @@ def analyze_frame(frame: np.ndarray, model: Any, confidence: float, imgsz: int =
     low_confidence_hazard = False
     names = result.names
     unicode_labels: list[tuple[str, tuple[int, int], tuple[int, int, int]]] = []
-    walkway = np.zeros((height, width), dtype=np.uint8)
     blocked = np.zeros_like(walkway)
 
     # Segmentation models also return the detection boxes above. Blend obstacle
     # and walkway context masks first; the existing boxes still drive warnings.
     masks = getattr(result, "masks", None)
-    if masks is not None and result.boxes is not None:
+    if render and masks is not None and result.boxes is not None:
         mask_data = masks.data
         if hasattr(mask_data, "cpu"):
             mask_data = mask_data.cpu().numpy()
@@ -354,20 +386,26 @@ def analyze_frame(frame: np.ndarray, model: Any, confidence: float, imgsz: int =
             # Even an uncertain hazard invalidates a proposed clear corridor.
             pad = max(5, int(width * .025))
             blocked[max(0, y1-pad):min(height, y2+pad), max(0, x1-pad):min(width, x2+pad)] = 1
-            # Ignore objects high in the image or entirely at the far edges.
-            if y2 < height * 0.52 or x2 < width * 0.16 or x1 > width * 0.84:
+            # Ignore objects high in the image or entirely at the far edges, except central overhanging hazards.
+            overhanging = (
+                y2 < height * 0.52
+                and x1 < width * 0.62 and x2 > width * 0.38
+                and y1 < height * 0.45 and y2 >= height * 0.28
+                and (y2 - y1) >= height * 0.28
+            )
+            if (y2 < height * 0.52 and not overhanging) or x2 < width * 0.16 or x1 > width * 0.84:
                 continue
 
             if score < confidence:
                 low_confidence_hazard = True
                 color = (0, 190, 255)
                 label = f"chưa rõ {score:.2f}"
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+                if render: cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
                 unicode_labels.append((label, (x1, y1 - 28), color))
                 continue
 
             direction = _direction((x1 + x2) / 2, width)
-            band = _relative_band(max(0, y2 - y1), y2, height)
+            band = _relative_band(max(0, y2 - y1), y2, height, overhanging=overhanging)
             obstacle = Obstacle(
                 class_name=class_name,
                 confidence=score,
@@ -382,10 +420,14 @@ def analyze_frame(frame: np.ndarray, model: Any, confidence: float, imgsz: int =
             normalized_name = class_name.lower().replace("_", " ")
             vi_name = VIETNAMESE_NAMES.get(normalized_name, class_name)
             label = f"{vi_name} • {band} • {score:.2f}"
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+            if render: cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
             unicode_labels.append((label, (x1, y1 - 28), color))
 
-    annotated = _draw_unicode_labels(annotated, unicode_labels)
+    if render and np.any(walkway):
+        overlay = annotated.copy()
+        overlay[walkway > 0] = (40, 180, 40)
+        annotated = cv2.addWeighted(overlay, 0.24, annotated, 0.76, 0)
+    if render: annotated = _draw_unicode_labels(annotated, unicode_labels)
 
     unclear_reason = quality_reason
     if low_confidence_hazard:
@@ -413,7 +455,28 @@ def analyze_frame(frame: np.ndarray, model: Any, confidence: float, imgsz: int =
         unclear_reason=unclear_reason,
         blur_score=blur_score,
         clear_corridors=tuple(clear_corridors),
+        walkable_mask=walkway if walkable_mask is not None else None,
     )
+
+
+def render_analysis(analysis):
+    """Render in the presentation thread, after warning decisions."""
+    if hasattr(analysis, "render_fn"):
+        return analysis.render_fn()
+    frame = analysis.frame.copy()
+    walkable = getattr(analysis, "walkable_mask", None)
+    if walkable is not None and walkable.shape[:2] == frame.shape[:2] and np.any(walkable):
+        overlay = frame.copy()
+        overlay[walkable > 0] = (40, 180, 40)
+        frame = cv2.addWeighted(overlay, 0.24, frame, 0.76, 0)
+    labels = []
+    for obj in analysis.obstacles:
+        x1, y1, x2, y2 = obj.box
+        color = (0, 70, 255) if obj.distance_band == 'gần' else (0, 190, 255)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        name = VIETNAMESE_NAMES.get(obj.class_name.lower().replace('_', ' '), obj.class_name)
+        labels.append((f'{name} • {obj.distance_band} • {obj.confidence:.2f}', (x1, y1-28), color))
+    return _draw_unicode_labels(frame, labels)
 
 
 def open_camera(index: int, width: int = 640, height: int = 480, fps: int = 60) -> cv2.VideoCapture | None:
@@ -556,6 +619,8 @@ class InferenceWorker(threading.Thread):
         imgsz: int = 480,
         device: str | None = None,
         ready_event: threading.Event | None = None,
+        segformer_model_path: str | None = None,
+        allow_routes: bool = False,
     ) -> None:
         super().__init__(name="obstacle-inference", daemon=True)
         self.model_path = model_path
@@ -565,7 +630,16 @@ class InferenceWorker(threading.Thread):
         self.events = events
         self.speech = speech
         self.imgsz, self.device, self.ready_event = imgsz, device, ready_event
-        self.policy = AlertPolicy()
+        self.segformer_model_path = segformer_model_path
+        self.policy = AlertPolicy(allow_routes=allow_routes and bool(segformer_model_path))
+        self.runtime_policy = json.loads((Path(__file__).parent/'runtime_policy.json').read_text(encoding='utf-8'))
+        cfg = self.runtime_policy
+        if not (0 < cfg['max_input_age_ms'] <= cfg['max_result_age_ms'] <= 700
+                and 0 < cfg['confirmation_window_s'] <= cfg['track_ttl_s'] <= .5
+                and 0 <= cfg['stable_seconds'] <= .3 and 0 < cfg['emergency_confidence'] <= 1):
+            raise ValueError('Cấu hình runtime_policy.json không hợp lệ.')
+        self.tracker = TemporalTracker(cfg['track_ttl_s'], cfg['confirmation_window_s'],
+                                       cfg['stable_seconds'], cfg['emergency_confidence'])
         self.measurements = Measurements()
         self.processing = Measurements()
         self._processed_frames = 0
@@ -584,10 +658,28 @@ class InferenceWorker(threading.Thread):
             # Load kernels before opening a video, otherwise its first seconds are lost.
             model.predict(np.zeros((480, 640, 3), dtype=np.uint8), imgsz=self.imgsz,
                           device=self.device, verbose=False)
-            torch.set_num_threads(max(1, int(os.environ.get("GUIDE_TORCH_THREADS", "8"))))
+            tuned_cpu = False
+            if self.model_path.lower().endswith('.onnx'):
+                from cpu_runtime import configure_onnx_cpu
+                tuned_cpu = configure_onnx_cpu(model, self.model_path,
+                                              int(os.environ.get('GUIDE_ORT_THREADS', '8')))
+            if tuned_cpu:
+                cv2.setNumThreads(1)
+                torch.set_num_threads(1)
+                model.predict(np.zeros((480, 640, 3), dtype=np.uint8), imgsz=self.imgsz,
+                              device=self.device, verbose=False)
+            else:
+                torch.set_num_threads(max(1, int(os.environ.get("GUIDE_TORCH_THREADS", "8"))))
+            segmenter = None
+            if self.segformer_model_path:
+                from semantic_segmenter import SegFormerWalkway
+                self.events.put({"type": "status", "text": "Đang nạp SegFormer phân đoạn lối đi…"})
+                segmenter = SegFormerWalkway(self.segformer_model_path, self.device)
+                segmenter.predict(np.zeros((320, 480, 3), dtype=np.uint8))
             if self.ready_event is not None:
                 self.ready_event.set()
-            self.events.put({"type": "status", "text": "Đang theo dõi hình ảnh. Không có cảnh báo không đồng nghĩa đường an toàn."})
+            status = "Đang theo dõi hình ảnh với YOLO + SegFormer." if segmenter else "Đang theo dõi hình ảnh với YOLO."
+            self.events.put({"type": "status", "text": status + " Không có cảnh báo không đồng nghĩa đường an toàn."})
             sequence = 0
             while not self.stop_event.is_set():
                 new_sequence, frame, closed, captured_at = self.latest_frame.next_after(sequence)
@@ -598,11 +690,18 @@ class InferenceWorker(threading.Thread):
                 self._skipped_frames += max(0, new_sequence - sequence - 1)
                 sequence = new_sequence
                 started = time.perf_counter()
-                analysis = analyze_frame(frame, model, self.confidence, self.imgsz, self.device)
+                if (started-captured_at)*1000 > self.runtime_policy['max_input_age_ms']:
+                    self.events.put({"type": "analysis_stale"})
+                    continue
+                walkable_mask = segmenter.predict(frame) if segmenter is not None else None
+                analysis = analyze_frame(frame, model, self.confidence, self.imgsz, self.device,
+                                         render=False, walkable_mask=walkable_mask)
+                analysis = self.tracker.update(analysis, captured_at)
+                analysis = replace(analysis, inferred_at=time.perf_counter())
                 elapsed_ms = (time.perf_counter() - captured_at) * 1000.0
                 self.processing.add((time.perf_counter() - started) * 1000)
                 self.measurements.add(elapsed_ms)
-                if elapsed_ms > 1500 or self.stop_event.is_set():
+                if elapsed_ms > self.runtime_policy['max_result_age_ms'] or self.stop_event.is_set():
                     # A slow first inference must never speak instructions for an old frame.
                     if not self.stop_event.is_set():
                         self.events.put({"type": "analysis_stale"})
@@ -617,13 +716,14 @@ class InferenceWorker(threading.Thread):
                         "latency_ms": elapsed_ms,
                         "skipped_frames": self._skipped_frames,
                         "captured_at": captured_at,
+                        "frame_sequence": new_sequence,
                         "guidance": guidance,
                     }
                 )
                 if should_speak and not self.stop_event.is_set():
                     self._spoken_alerts += 1
                     self.speech.speak(guidance.message, captured_at, priority=guidance.priority,
-                                      clip=guidance.clip, key=guidance.key)
+                                      clip=guidance.clip, key=guidance.key, max_age=.7)
                     self.events.put({"type": "alert_count", "count": self._spoken_alerts})
                 if self._processed_frames == 1 or time.perf_counter() - getattr(self, "_last_metrics", 0) >= .5:
                     self._emit_metrics()
@@ -640,8 +740,13 @@ class InferenceWorker(threading.Thread):
 
     def _emit_metrics(self):
         stats, camera, processing = self.measurements.snapshot(), self.latest_frame.measurements.snapshot(), self.processing.snapshot()
+        try:
+            import psutil
+            rss_mb = psutil.Process().memory_info().rss / (1024*1024)
+        except ImportError:
+            rss_mb = None
         self.events.put({"type": "metrics", "processed_frames": stats["count"],
-                         "capture_frames": camera["count"], "camera_fps": camera["fps"],
+                         "capture_frames": camera["count"], "camera_fps": camera["fps"], "process_rss_mb": rss_mb,
                          "inference_fps": stats["fps"], "skipped_frames": self._skipped_frames,
                          "p50_frame_to_inference_ms": stats["p50_ms"],
                          "p95_frame_to_inference_ms": stats["p95_ms"],

@@ -1,0 +1,13 @@
+{
+  "voice": "khanh_vy",
+  "engine": "KorvaTTS",
+  "phrases": {
+    "unclear": "Chưa xác nhận được lối đi.",
+    "stop": "Dừng lại.",
+    "slow": "Đi chậm lại.",
+    "keep_heading": "Giữ hướng, đi chậm.",
+    "shift_left": "Lệch nhẹ sang trái.",
+    "shift_right": "Lệch nhẹ sang phải.",
+    "narrow": "Lối đi hẹp. Đi chậm lại."
+  }
+}

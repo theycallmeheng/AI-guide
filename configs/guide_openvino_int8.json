@@ -1,0 +1,49 @@
+{
+  "models": [
+    {
+      "id": "rod_26_ov_int8",
+      "adapter": "openvino_yolo",
+      "role": "detector",
+      "path": "models/openvino/yolo26n_best_int8_openvino_model",
+      "device": "openvino:CPU",
+      "imgsz": 480,
+      "enabled": true
+    },
+    {
+      "id": "ade20k_b0_ov_int8",
+      "adapter": "openvino_segformer",
+      "role": "semantic",
+      "path": "models/openvino/segformer_sidewalk_int8",
+      "device": "openvino:GPU",
+      "imgsz": 384,
+      "enabled": true
+    },
+    {
+      "id": "depth_v2_ov_int8",
+      "adapter": "openvino_depth",
+      "role": "depth",
+      "path": "models/openvino/depth_v2_small_int8",
+      "device": "openvino:GPU",
+      "imgsz": 350,
+      "enabled": true
+    }
+  ],
+  "environment": "alley",
+  "mode": "realtime_replay",
+  "sample_fps": 10,
+  "max_side": 640,
+  "mirror_input": false,
+  "confirm_horizon_ratio": 0.70,
+  "temporal_ema_alpha": 0.65,
+  "ttc_stop_s": 1.6,
+  "head_hazard_enabled": true,
+  "depth_obstacle_enabled": true,
+  "preempt_emergency_audio": true,
+  "smart_arbitration": true,
+  "post_stop_hold_s": 0.8,
+  "tail_grace_s": 0.15,
+  "revocation_debounce_frames": 2,
+  "earcon_enabled": true,
+  "stereo_audio": true,
+  "audio_enabled": true
+}

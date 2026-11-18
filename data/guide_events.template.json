@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "reviewed": false,
+  "video": "replace_with_video_name.mp4",
+  "video_sha256": null,
+  "session_id": "required_session",
+  "location_id": "required_location",
+  "split": "validation",
+  "duration_s": 0,
+  "scenarios": [
+    "alley",
+    "narrow",
+    "crowded",
+    "crossing",
+    "stairs",
+    "dark",
+    "shake",
+    "clear"
+  ],
+  "intervals": []
+}
+

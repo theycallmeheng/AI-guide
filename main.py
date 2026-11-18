@@ -8,7 +8,7 @@ from tkinter import filedialog, messagebox, ttk
 import webbrowser
 import cv2
 from PIL import Image, ImageTk
-from pipeline import GuidePipeline, PipelineConfig, default_model
+from pipeline import GuidePipeline, PipelineConfig, available_core_profiles, default_model, default_segformer_model
 from obstacle_detector import open_camera
 
 APP_DIR = Path(__file__).resolve().parent
@@ -20,9 +20,17 @@ class ObstacleGuideApp:
         root.geometry("1200x810")
         root.minsize(1040, 710)
         self.pipeline = GuidePipeline(engine=engine)
+        self.profiles = available_core_profiles()
+        self._label_to_profile = {str(v["label"]): k for k, v in self.profiles.items()}
+        first_profile = next(iter(self.profiles.values()))["label"]
+        self.core_profile = tk.StringVar(value=str(first_profile))
+        self.environment = tk.StringVar(value="alley")
+        self.mirror_input = tk.BooleanVar(value=False)
         self.source = tk.StringVar(value="Webcam / DroidCam")
         self.camera = tk.StringVar(value="0")
         self.model = tk.StringVar(value=model or str(default_model()))
+        self.segformer_model = tk.StringVar(value=default_segformer_model())
+        self.allow_routes = tk.BooleanVar(value=False)
         self.video = tk.StringVar()
         self.url = tk.StringVar()
         self.imgsz = tk.StringVar(value="480")
@@ -35,6 +43,7 @@ class ObstacleGuideApp:
         self.summary = tk.StringVar()
         self.metric_vars = [tk.StringVar(value="—") for _ in range(4)]
         self._last_frame = -1
+        self._last_preview_sequence = -1
         self._photo = None
         self.scanning = False
         self._build_ui()
@@ -86,10 +95,27 @@ class ObstacleGuideApp:
         self.source_hint.pack(anchor="w", pady=(5, 0))
         ttk.Button(side, text="Hướng dẫn DroidCam ↗", command=lambda: webbrowser.open("https://droidcam.app/windows/")).pack(fill="x", pady=(6, 0))
         label("2. Mô hình và tốc độ")
+        ttk.Label(side, text="Chế độ lõi AI", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        profile_combo = ttk.Combobox(side, textvariable=self.core_profile,
+                                     values=tuple(self._label_to_profile.keys()), state="readonly")
+        profile_combo.pack(fill="x", pady=(0, 5))
+        env_row = ttk.Frame(side)
+        env_row.pack(fill="x", pady=(0, 5))
+        ttk.Label(env_row, text="Bối cảnh").pack(side="left")
+        ttk.Combobox(env_row, textvariable=self.environment, values=("alley", "sidewalk", "indoor"),
+                     width=10, state="readonly").pack(side="left", padx=6)
+        ttk.Checkbutton(env_row, text="Lật gương", variable=self.mirror_input).pack(side="left")
         row = ttk.Frame(side)
         row.pack(fill="x")
         ttk.Entry(row, textvariable=self.model, width=17).pack(side="left", fill="x", expand=True)
         ttk.Button(row, text="Chọn…", command=self.choose_model).pack(side="left", padx=(4, 0))
+        ttk.Label(side, text="SegFormer vùng lối đi (bản V1)", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(7, 3))
+        segmenter_row = ttk.Frame(side)
+        segmenter_row.pack(fill="x")
+        ttk.Entry(segmenter_row, textvariable=self.segformer_model, width=17).pack(side="left", fill="x", expand=True)
+        ttk.Button(segmenter_row, text="Thư mục…", command=self.choose_segformer).pack(side="left", padx=(4, 0))
+        ttk.Checkbutton(side, text="Cho phép gợi ý trái/phải (bản V1)",
+                        variable=self.allow_routes).pack(anchor="w", pady=(3, 0))
         row = ttk.Frame(side)
         row.pack(fill="x", pady=7)
         ttk.Label(row, text="Ảnh AI").pack(side="left")
@@ -103,8 +129,8 @@ class ObstacleGuideApp:
         self.conf_label.configure(text="Độ tin cậy: 0.30")
         label("3. Cảnh báo tiếng Việt")
         ttk.Checkbutton(side, text="Bật âm thanh trên laptop", variable=self.sound,
-                        command=lambda: self.pipeline.speech.set_enabled(self.sound.get())).pack(anchor="w")
-        ttk.Button(side, text="Thử: Dừng lại", command=lambda: self.pipeline.speech.speak("Dừng lại.", priority=3, clip="stop", max_age=10)).pack(fill="x", pady=5)
+                        command=lambda: self.pipeline.set_sound_enabled(self.sound.get())).pack(anchor="w")
+        ttk.Button(side, text="Thử: Dừng lại", command=self.pipeline.test_alert).pack(fill="x", pady=5)
         ttk.Label(side, textvariable=self.voice, wraplength=290, style="Muted.TLabel").pack(anchor="w")
         self.start_button = ttk.Button(side, text="▶  Bắt đầu nhận diện", style="Accent.TButton", command=self.start)
         self.start_button.pack(fill="x", pady=(18, 5))
@@ -142,6 +168,10 @@ class ObstacleGuideApp:
         path = filedialog.askopenfilename(filetypes=(("YOLO / ONNX", "*.pt *.onnx"), ("Mọi tệp", "*.*")))
         if path: self.model.set(path)
 
+    def choose_segformer(self):
+        path = filedialog.askdirectory(title="Chọn thư mục model SegFormer")
+        if path: self.segformer_model.set(path)
+
     def choose_video(self):
         path = filedialog.askopenfilename(filetypes=(("Video", "*.mp4 *.mov *.avi *.mkv"),))
         if path: self.video.set(path)
@@ -165,9 +195,16 @@ class ObstacleGuideApp:
         try:
             mode = self.source.get()
             source = int(self.camera.get()) if mode == "Webcam / DroidCam" else self.video.get().strip() if mode == "Video đã ghi" else self.url.get().strip()
+            prof_key = self._label_to_profile.get(self.core_profile.get(), "legacy_v1")
+            core_cfg = self.profiles.get(prof_key, {}).get("path")
             config = PipelineConfig(source=source, model=self.model.get().strip(), imgsz=int(self.imgsz.get()),
                                     confidence=self.confidence.get(), live_stream=mode == "Camera IP",
-                                    device=None if self.device.get() == "auto" else self.device.get())
+                                    device=None if self.device.get() == "auto" else self.device.get(),
+                                    segformer_model=self.segformer_model.get().strip() or None,
+                                    allow_routes=self.allow_routes.get(),
+                                    core_config=str(core_cfg) if core_cfg else None,
+                                    environment=self.environment.get().strip() or "alley",
+                                    mirror_input=self.mirror_input.get())
             self.pipeline.start(config)
         except (ValueError, RuntimeError) as exc:
             messagebox.showerror("Không thể bắt đầu", str(exc))
@@ -197,16 +234,29 @@ class ObstacleGuideApp:
         self.scan.configure(state="disabled" if running or self.scanning else "normal")
         self.stop_button.configure(state="normal" if running else "disabled")
         number, packet = self.pipeline.latest_analysis()
+        preview = self.pipeline.latest_preview()
         if packet is not None and number != self._last_frame:
             self._last_frame = number
-            image = Image.fromarray(cv2.cvtColor(packet["analysis"].frame, cv2.COLOR_BGR2RGB))
+            from obstacle_detector import render_analysis
+            frame = render_analysis(packet["analysis"])
+        elif packet is None and preview is not None:
+            sequence, raw_frame, _captured_at = preview
+            if sequence != self._last_preview_sequence:
+                frame = raw_frame
+            else:
+                frame = None
+            self._last_preview_sequence = sequence
+        else:
+            frame = None
+        if frame is not None:
+            image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             image.thumbnail((max(640, self.preview.winfo_width()), max(360, self.preview.winfo_height())), Image.Resampling.BILINEAR)
             self._photo = ImageTk.PhotoImage(image)
             self.preview.configure(image=self._photo, text="")
-        elif packet is None and self._photo is not None:
+        elif packet is None and preview is None and self._photo is not None:
             self._photo = None
             self.preview.configure(image="", text=state["status"])
-        self.root.after(33, self._poll)
+        self.root.after(34, self._poll)
 
     def close(self):
         self.pipeline.close()

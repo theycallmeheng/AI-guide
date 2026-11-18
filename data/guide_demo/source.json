@@ -1,0 +1,9 @@
+{
+  "source": "data/videos/val1.mp4",
+  "source_sha256": "273b964a67c4a4af750f7ab66391057c8bea7c082f9466fcf9d805d32143bfd0",
+  "excerpt": "val1_excerpt.mp4",
+  "start_s": 0,
+  "duration_requested_s": 6,
+  "purpose": "unlabelled integration smoke test, not threshold tuning or acceptance",
+  "source_provenance": "Existing user-provided project video; external source/license not reverified"
+}

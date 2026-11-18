@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="vi"><meta charset="utf-8"><title>Gán nhãn sự kiện Guide</title>
+<style>body{font:17px system-ui;max-width:1050px;margin:30px auto;background:#eef3f8;color:#172b42}video{width:100%;max-height:460px;background:#111}input,select,button{padding:9px;margin:5px}button{cursor:pointer}fieldset{margin:15px 0}pre{white-space:pre-wrap}label{display:inline-block}#status{color:#8c2805}</style>
+<h1>Gán nhãn theo thời gian video</h1>
+<p>Chỉ dùng video đã chọn riêng cho validation/test. “Hướng đúng” là nhãn do người kiểm tra xác nhận; không lấy lời dự đoán của AI làm đáp án.</p>
+<input type="file" id="file" accept="video/*"><video id="video" controls></video>
+<fieldset><legend>Phiên quay</legend>
+<label>Phiên <input id="session" required></label><label>Địa điểm <input id="location" required></label>
+<select id="split"><option>validation</option><option>test</option></select>
+</fieldset>
+<fieldset><legend>Khoảng thời gian</legend>
+<button id="startNow">Đánh dấu bắt đầu</button><input id="start" type="number" min="0" step=".1" value="0">
+<button id="endNow">Đánh dấu kết thúc</button><input id="end" type="number" min="0" step=".1" value="1">
+<select id="kind"><option value="hazard">Nguy hiểm</option><option value="clear">Thông thoáng</option><option value="guidance">Có thể chỉ hướng</option><option value="unclear">Phải báo chưa rõ</option></select>
+<div>Hành động chấp nhận được: <span id="allowed"></span></div>
+<div>Hướng/hành động bị cấm: <span id="forbidden"></span></div>
+<input id="description" placeholder="Mô tả: người đi ngang, bậc, hẻm..." size="55">
+<button id="add">Thêm khoảng</button>
+</fieldset>
+<label><input type="checkbox" id="reviewed">Tôi đã xem lại các khoảng và nhãn</label>
+<button id="export">Tải JSON nhãn</button><button id="reset">Bắt đầu nhãn mới</button><input id="import" type="file" accept=".json">
+<p id="status"></p><div id="events"></div>
+<script>
+const el=id=>document.getElementById(id);
+const actions=['UNCLEAR','STOP','SLOW','KEEP_HEADING','SHIFT_LEFT','SHIFT_RIGHT'];
+const names=['Chưa rõ','Dừng','Chậm','Giữ hướng','Lệch trái','Lệch phải'];
+let events=[],videoFile=null,url=null,imported=null;
+for(const group of ['allowed','forbidden']) actions.forEach((a,i)=>{
+ const label=document.createElement('label'),box=document.createElement('input');
+ box.type='checkbox';box.value=a;box.dataset.group=group;label.append(box,document.createTextNode(names[i]));el(group).append(label);
+});
+const selected=group=>Array.from(document.querySelectorAll('[data-group='+group+']:checked')).map(x=>x.value);
+el('file').onchange=e=>{const f=e.target.files[0];if(!f)return;if(url)URL.revokeObjectURL(url);url=URL.createObjectURL(f);el('video').src=url;videoFile=f;el('reviewed').checked=false;};
+el('startNow').onclick=()=>el('start').value=el('video').currentTime.toFixed(2);
+el('endNow').onclick=()=>el('end').value=el('video').currentTime.toFixed(2);
+function render(){el('events').replaceChildren();events.forEach((e,i)=>{const line=document.createElement('p'),b=document.createElement('button');line.textContent=JSON.stringify(e);b.textContent='Xóa';b.onclick=()=>{events.splice(i,1);el('reviewed').checked=false;render()};line.append(b);el('events').append(line);});}
+el('reset').onclick=()=>{
+ if(events.length&&!window.confirm('Bỏ các mốc đang mở để bắt đầu video mới?'))return;
+ events=[];imported=null;el('reviewed').checked=false;el('import').value='';el('session').value='';el('location').value='';render();
+};
+el('add').onclick=()=>{
+ const event={start:+el('start').value,end:+el('end').value,kind:el('kind').value,allowed_actions:selected('allowed'),forbidden_actions:selected('forbidden'),description:el('description').value};
+ if(!(event.start>=0&&event.end>event.start&&event.end<=el('video').duration)||!event.allowed_actions.length||event.allowed_actions.some(a=>event.forbidden_actions.includes(a))){el('status').textContent='Kiểm tra thời gian và các hành động: không được vừa cho phép vừa cấm.';return;}
+ events.push(event);events.sort((a,b)=>a.start-b.start);el('reviewed').checked=false;render();el('status').textContent='Đã thêm. Nhớ tải JSON để lưu.';
+};
+el('export').onclick=async ()=>{
+ const file=videoFile,duration=el('video').duration;
+ if(!file||!Number.isFinite(duration)||!el('session').value.trim()||!el('location').value.trim()||!events.length){el('status').textContent='Chọn video, nhập phiên và địa điểm, rồi thêm khoảng thời gian.';return;}
+ el('export').disabled=true;
+ try {
+   const data={schema_version:1,reviewed:el('reviewed').checked,video:file.name,session_id:el('session').value.trim(),location_id:el('location').value.trim(),split:el('split').value,duration_s:duration,intervals:structuredClone(events)};
+   const previous=imported;
+   if(window.crypto?.subtle){
+     const hash=await crypto.subtle.digest('SHA-256',await file.arrayBuffer());
+     data.video_sha256=Array.from(new Uint8Array(hash),byte=>byte.toString(16).padStart(2,'0')).join('');
+   }
+   if(videoFile!==file || imported!==previous){el('status').textContent='Video hoặc nhãn vừa đổi. Bấm tải JSON lại.';return;}
+   if(previous && (previous.video_sha256 ? previous.video_sha256!==data.video_sha256 : previous.video!==file.name)){
+     el('status').textContent='JSON đã nhập thuộc video khác. Chọn đúng tệp video gốc.';return;
+   }
+   const link=document.createElement('a'),blob=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));link.href=blob;link.download=file.name+'.events.json';link.click();setTimeout(()=>URL.revokeObjectURL(blob),1000);
+   imported=data;
+   el('status').textContent='Đã tải JSON nhãn.';
+ } catch { el('status').textContent='Không đọc được tệp video để xuất JSON.'; }
+ finally { el('export').disabled=false; }
+};
+el('import').onchange=async e=>{try{const d=JSON.parse(await e.target.files[0].text());if(!Array.isArray(d.intervals))throw Error();imported=d;events=d.intervals;el('session').value=d.session_id;el('location').value=d.location_id;el('split').value=d.split;el('reviewed').checked=false;render();}catch{el('status').textContent='JSON không hợp lệ';}};
+</script></html>
+

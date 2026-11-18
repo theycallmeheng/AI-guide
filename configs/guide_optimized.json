@@ -1,0 +1,56 @@
+{
+  "models": [
+    {
+      "id": "rod_v8",
+      "adapter": "yolo",
+      "role": "detector",
+      "path": "models/results/best.pt",
+      "device": "auto",
+      "imgsz": 480,
+      "enabled": false
+    },
+    {
+      "id": "rod_26",
+      "adapter": "yolo",
+      "role": "detector",
+      "path": "models/results/yolo26n_best.pt",
+      "device": "auto",
+      "imgsz": 480,
+      "enabled": true
+    },
+    {
+      "id": "ade20k_b0",
+      "adapter": "segformer",
+      "role": "semantic",
+      "path": "models/segformer_sidewalk",
+      "device": "auto",
+      "imgsz": 448
+    },
+    {
+      "id": "depth_v2_small",
+      "adapter": "depth_anything",
+      "role": "depth",
+      "path": "models/depth_anything_v2_small",
+      "device": "auto",
+      "imgsz": 350
+    }
+  ],
+  "environment": "alley",
+  "mode": "offline",
+  "sample_fps": 10,
+  "max_side": 640,
+  "mirror_input": false,
+  "confirm_horizon_ratio": 0.70,
+  "temporal_ema_alpha": 0.65,
+  "ttc_stop_s": 1.6,
+  "head_hazard_enabled": true,
+  "depth_obstacle_enabled": true,
+  "preempt_emergency_audio": true,
+  "smart_arbitration": true,
+  "post_stop_hold_s": 0.8,
+  "tail_grace_s": 0.15,
+  "revocation_debounce_frames": 2,
+  "earcon_enabled": true,
+  "stereo_audio": true,
+  "audio_enabled": true
+}

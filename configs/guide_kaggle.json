@@ -1,0 +1,44 @@
+{
+  "models": [
+    {
+      "id": "rod_v8",
+      "adapter": "yolo",
+      "role": "detector",
+      "path": "models/results/best.pt",
+      "device": "auto",
+      "imgsz": 480
+    },
+    {
+      "id": "rod_26",
+      "adapter": "yolo",
+      "role": "detector",
+      "path": "models/results/yolo26n_best.pt",
+      "device": "auto",
+      "imgsz": 480,
+      "enabled": false
+    },
+    {
+      "id": "ade20k_b0",
+      "adapter": "segformer",
+      "role": "semantic",
+      "path": "models/segformer_sidewalk",
+      "device": "auto",
+      "imgsz": 448
+    },
+    {
+      "id": "depth_v2_small",
+      "adapter": "depth_anything",
+      "role": "depth",
+      "path": "models/depth_anything_v2_small",
+      "device": "auto",
+      "imgsz": 350
+    }
+  ],
+  "environment": "alley",
+  "mode": "offline",
+  "sample_fps": 10,
+  "max_side": 640,
+  "mirror_input": false,
+  "audio_enabled": true
+}
+

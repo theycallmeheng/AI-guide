@@ -47,3 +47,9 @@ data/training/*
 data/external/
 reports/*
 !reports/.gitkeep
+# New-core demo artifacts and downloaded HF bookkeeping stay local.
+runs/guide_v2/
+models/openvino/
+models/**/.cache/
+compatibility.json
+data/guide_demo/*.mp4

@@ -1,5 +1,9 @@
 # Guide — nhận biết chướng ngại vật trên laptop và web
 
+**Lõi nhiều model mới cho demo Kaggle:** xem [GUIDE_V2.md](GUIDE_V2.md).
+Notebook `kaggle_demo_yolo_segformer.ipynb` gọi `guide_core/` (YOLO + SegFormer + depth).
+Desktop/web bên dưới vẫn dùng pipeline hiện tại làm bản đối chiếu; chưa tự chuyển sang lõi mới.
+
 Pipeline dùng chung cho desktop và web local: webcam, DroidCam, luồng RTSP/MJPEG hoặc video đã ghi. Mặc định dùng mô hình ROD tại `models/results/best.pt` nếu có.
 
 ## Chạy desktop
@@ -16,6 +20,14 @@ Chọn **Webcam / DroidCam**, nhập chỉ số camera (thường 0 hoặc 1), h
 **Thử: Dừng lại** phát clip tiếng Việt mà không cần mở camera. Tắt **Bật âm thanh trên laptop** để quan sát yên lặng.
 
 PyTorch được nạp trước WinRT để tránh xung đột nạp DLL trên Windows. Nếu một môi trường khác báo c10.dll, dùng lại Python đã chạy được thay vì tự đổi sang môi trường đó.
+
+### Chạy YOLO kết hợp SegFormer
+
+Giao diện desktop mặc định nạp YOLO từ `models/results/best.pt` và SegFormer từ `models/segformer_sidewalk/` nếu các thư mục model tồn tại. SegFormer cần `config.json` cùng `model.safetensors` hoặc `pytorch_model.bin`; thư mục có thể đổi bằng nút **Thư mục…**. Xóa đường dẫn SegFormer trong ô tương ứng để chỉ chạy YOLO. `transformers==5.20.0` được khai báo trong `requirements.txt`.
+
+SegFormer tạo mặt nạ màu xanh cho lớp lối đi, rồi pipeline giao mặt nạ đó cùng khung hình cho bước tìm hành lang. YOLO tiếp tục phát hiện vật cản; hộp vật cản sẽ chặn hành lang tương ứng. Tên các lớp lối đi được đọc từ `id2label` trong cấu hình của model. Model ADE20K tổng quát chỉ dùng lớp `sidewalk`; không tự xem `floor`, `road`, `wall` hoặc `door` là lối đi.
+
+Để thử gợi ý trái/phải, bật **Cho phép gợi ý trái/phải (thử nghiệm)** sau khi kiểm tra video trong môi trường an toàn. Tùy chọn này mặc định tắt. Bản đồ SegFormer chưa được kiểm chứng như một chỉ dẫn đi bộ an toàn.
 
 ## Kết nối iPhone bằng DroidCam
 
@@ -180,6 +192,19 @@ Mười hai lớp theo thứ tự ID: `person`, `bicycle`, `motorcycle`, `car`, 
 PAVE trên Hugging Face có thể tham khảo cách mô tả khả năng đi lại và ngữ nghĩa cảnh; các chú giải của PAVE không thay thế ảnh SANPO và nhãn phân đoạn tương ứng trong dữ liệu train. Không đưa VLM vào luồng cảnh báo MVP. SANPO có góc nhìn egocentric, ảnh và nhãn panoptic cho một phần khung hình; trang chính thức trỏ tới giấy phép CC BY 4.0, cần ghi công khi sử dụng. SurDis công bố giấy phép CC BY-NC-SA 4.0 và bộ dữ liệu hiện được lưu ở đường dẫn tạm thời, nên không dùng trong sản phẩm thương mại khi chưa có quyền phù hợp. [SANPO](https://github.com/google-research-datasets/sanpo_dataset), [SurDis](https://github.com/kuanyewleong/surdis), [PAVE](https://huggingface.co/datasets/rafiibnsultan/PAVE).
 
 Chi tiết phím tắt, cấu trúc tập dữ liệu, lệnh chạy và lưu ý giấy phép nằm trong [data/README.md](data/README.md). Mô hình ROD đã huấn luyện được đặt ở `models/results/best.pt`; đợt nâng cấp này tập trung vào runtime và giao diện, chưa huấn luyện thêm dataset.
+
+## Nâng cấp detection và cảnh báo
+
+Xem [UPGRADE_GUIDE.md](UPGRADE_GUIDE.md) để kiểm tra dataset YOLO detection,
+huấn luyện hai ứng viên bằng `kaggle_finetune_detection.ipynb`, chấm sự kiện và đo runtime.
+Ngưỡng độ mới/track nằm trong `runtime_policy.json`. Mặc định chỉ cảnh báo vật cản,
+không ra lệnh rẽ/đi thẳng; cảnh báo chờ được cập nhật theo quan sát mới và bỏ khi hết hạn.
+
+## Demo YOLO + SegFormer trên Kaggle GPU
+
+Dùng notebook độc lập [kaggle_demo_yolo_segformer.ipynb](kaggle_demo_yolo_segformer.ipynb). Tạo Kaggle Dataset chứa `best.pt`, toàn bộ thư mục `segformer_sidewalk/` và video MP4, gắn dataset vào notebook, bật GPU trong **Settings → Accelerator**, rồi chạy các ô từ trên xuống. Notebook xuất video đã phủ kết quả và CSV sự kiện vào `/kaggle/working/`.
+
+Đây là demo video đã ghi, không chạy cửa sổ Tkinter, webcam laptop hay giọng WinRT. GPU quota cần còn đủ; nếu Kaggle không cấp GPU, notebook vẫn chạy CPU nhưng chậm. Thời gian notebook in ra là benchmark trên Kaggle của lần chạy đó, không đại diện FPS camera hoặc độ trễ âm thanh trên laptop.
 
 ## SegFormer Sidewalk trên Kaggle
 

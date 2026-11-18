@@ -1,7 +1,7 @@
 """Preloaded Vietnamese alerts with serialized, latest-warning playback."""
 from __future__ import annotations
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import os
 from pathlib import Path
@@ -26,6 +26,8 @@ class Request:
     priority: int
     expires_at: float
     requested_at: float
+    ready_at: float | None = None
+    queued_behind_active: bool = False
 
 def wav_seconds(path):
     with wave.open(str(path), "rb") as audio:
@@ -53,6 +55,7 @@ class SpeechWorker:
         self._active_key = None
         self._active_sequence = None
         self._active_priority = 0
+        self._observation = None
         self.audio_ready = threading.Event()
         self._output_error = None
         self._synth_thread = threading.Thread(target=self._synthesize, name="speech-synthesis", daemon=True)
@@ -83,7 +86,8 @@ class SpeechWorker:
             if key and queued is not None and queued.key == key and priority <= queued.priority: return
             self._request_sequence += 1
             request = Request(self._generation, self._request_sequence, message, key,
-                              captured_at, priority, captured_at+max_age, now)
+                              captured_at, priority, captured_at+max_age, now, now,
+                              self._active_sequence is not None)
             self._pending = self._play = None
             # Command first, followed by the object, direction and relative band.
             audio = self.bank.compose(key,priority)
@@ -109,6 +113,21 @@ class SpeechWorker:
             self._active_sequence = None
             self._active_priority = 0
             self._condition.notify_all()
+
+    def observe(self, key, captured_at, priority, max_age=.7):
+        """Refresh only a still-observed pending alert; never interrupt active audio."""
+        with self._condition:
+            self._observation = (key, captured_at, priority, max_age)
+            queued = self._play[0] if self._play else self._pending
+            if not priority or (queued is not None and (queued.key != key or queued.priority != priority)):
+                self.clear_pending()
+                return
+            if queued is not None:
+                fresh = replace(queued, captured_at=captured_at, expires_at=captured_at+max_age)
+                if self._play:
+                    self._play = (fresh, self._play[1])
+                else:
+                    self._pending = fresh
 
     def clear_pending(self):
         """Discard queued/synthesizing warnings without interrupting current audio."""
@@ -154,10 +173,15 @@ class SpeechWorker:
                     finally: temporary.unlink(missing_ok=True)
                     audio = read_audio(path)
                     with self._condition:
+                        if self._observation is not None and request.key is not None:
+                            key, captured_at, priority, max_age = self._observation
+                            if request.key != key or request.priority != priority:
+                                continue
+                            request = replace(request, captured_at=captured_at, expires_at=captured_at+max_age)
                         if (not self._closed and request.generation == self._generation
                                 and request.sequence == self._request_sequence
                                 and request.expires_at >= time.perf_counter()):
-                            self._play = (request,audio)
+                            self._play = (replace(request, ready_at=time.perf_counter()),audio)
                             self._condition.notify_all()
                 except Exception as exc:
                     self.events.put({"type":"speech_error","text":f"Không tổng hợp được câu động: {exc}"})
@@ -186,7 +210,8 @@ class SpeechWorker:
                     if self._closed: return
                     request,audio = self._play
                     self._play = None
-                    if request.generation != self._generation: continue
+                    if (request.generation != self._generation or
+                            request.expires_at < time.perf_counter()): continue
                     # Once queued, a warning waits for the active clip to finish.
                     # Newer requests replace this slot; they never interrupt playback.
                     self._active_key = request.key
@@ -196,6 +221,9 @@ class SpeechWorker:
                     submitted_at = time.perf_counter()
                 # Never call the event sink while holding the audio lock.
                 self.events.put({"type":"feedback_latency","latency_ms":(submitted_at-request.captured_at)*1000,
+                                 "queue_wait_ms":(submitted_at-(request.ready_at or request.requested_at))*1000,
+                                 "queued_behind_active":request.queued_behind_active,
+                                 "key":request.key, "priority":request.priority,
                                  "dispatch_ms":(submitted_at-request.requested_at)*1000,
                                  "audio_duration_ms":audio.duration*1000,"backend":output.name,
                                  "measurement":"audio_submit"})
