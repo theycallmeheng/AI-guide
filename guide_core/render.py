@@ -1,11 +1,24 @@
+from functools import lru_cache
+import importlib.util
 from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+@lru_cache(maxsize=16)
 def font(size):
-    for path in ("assets/fonts/DejaVuSans.ttf","C:/Windows/Fonts/arial.ttf","/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
-        if Path(path).exists(): return ImageFont.truetype(path,size)
+    candidates = [
+        "assets/fonts/DejaVuSans.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ]
+    spec = importlib.util.find_spec("matplotlib")
+    if spec and spec.origin:
+        candidates.append(str(Path(spec.origin).parent / "mpl-data/fonts/ttf/DejaVuSans.ttf"))
+    for path in candidates:
+        if Path(path).exists():
+            return ImageFont.truetype(path, size)
     return ImageFont.load_default()
 
 def render(scene,decision,stage="fused"):
@@ -17,7 +30,7 @@ def render(scene,decision,stage="fused"):
         box_color=(0,50,255) if (ttc is not None and ttc<=1.6) or getattr(obj,"zone","ground")=="head" else (0,140,255)
         cv2.rectangle(image,(x1,y1),(x2,y2),box_color,2)
         ttc_tag=f" TTC:{ttc:.1f}s" if ttc is not None else ""
-        head_tag=" [TRÊN]" if getattr(obj,"zone","ground")=="head" else ""
+        head_tag=" [HEAD]" if getattr(obj,"zone","ground")=="head" else ""
         text=f"{obj.label}{head_tag} #{obj.track_id or '-'} {obj.confidence:.2f}{ttc_tag}"
         cv2.putText(image,text,(x1,max(15,y1-5)),cv2.FONT_HERSHEY_SIMPLEX,.4,(0,230,255),1,cv2.LINE_AA)
     route=decision.route if decision.frame_key==scene.frame.key else None

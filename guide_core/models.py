@@ -56,6 +56,18 @@ STRUCTURE_LABELS = {
     "box", "barrel", "ashcan", "water", "river", "swimming pool",
 }
 STAIR_LABELS = {"stairs", "stairway", "escalator", "step"}
+GROUND_BOUND_LABELS = {
+    "stairs", "step", "pothole", "manhole", "chair", "bench", "table",
+    "dog", "bicycle", "motorcycle", "car", "bus", "truck", "van", "minibike",
+    "cone", "dustbin", "plant pot", "person",
+}
+
+def _classify_zone(label, box, hw):
+    if label in GROUND_BOUND_LABELS:
+        return "ground"
+    h, w = hw
+    y2_limit = h * (.45 if h > w else .78)
+    return "head" if box[1] < h * .48 and box[3] < y2_limit else "ground"
 
 @register("yolo")
 class YoloAdapter(BaseAdapter):
@@ -64,10 +76,13 @@ class YoloAdapter(BaseAdapter):
         return {"quantize":16 if self.device.startswith("cuda") else 32} if "quantize" in DEFAULT_CFG_DICT else {"half":self.device.startswith("cuda")}
 
     def load(self):
+        import torch
         from ultralytics import YOLO
         p = Path(self.spec.path)
         if not (p.is_file() or p.is_dir()):
             raise FileNotFoundError(self.spec.path)
+        if self.device.startswith("cuda"):
+            torch.cuda.set_device(self.device)
         task = "detect" if str(p).lower().endswith((".onnx", "_openvino_model")) else None
         self.model = YOLO(str(p), task=task)
         self.model.predict(np.zeros((320, 320, 3), np.uint8), imgsz=self.spec.imgsz,
@@ -80,6 +95,9 @@ class YoloAdapter(BaseAdapter):
                 pass
 
     def predict(self, frame):
+        if self.device.startswith("cuda"):
+            import torch
+            torch.cuda.set_device(self.device)
         h_img = frame.bgr.shape[0]
         result = self.model.predict(frame.bgr, imgsz=self.spec.imgsz, conf=self.spec.confidence,
                                     device=self.device, verbose=False, **self.precision())[0]
@@ -88,7 +106,7 @@ class YoloAdapter(BaseAdapter):
             for row in result.boxes.data.cpu().numpy():
                 label = canonical(result.names[int(row[5])], self.spec.label_map)
                 box = tuple(map(float, row[:4]))
-                zone = "head" if box[1] < h_img * .48 and box[3] < h_img * .78 else "ground"
+                zone = _classify_zone(label, box, frame.bgr.shape[:2])
                 detections.append(Detection(label, float(row[4]), box, (self.spec.id,), zone=zone))
         return detections
 
@@ -99,6 +117,8 @@ class HFAdapter(BaseAdapter):
         path = Path(self.spec.path)
         if not (path / "config.json").is_file():
             raise FileNotFoundError("Complete local HF folder required: " + str(path))
+        if self.device.startswith("cuda"):
+            torch.cuda.set_device(self.device)
         self.processor = AutoImageProcessor.from_pretrained(str(path), local_files_only=True)
         model_cls = AutoModelForSemanticSegmentation if self.spec.role == "semantic" else AutoModelForDepthEstimation
         self.model = model_cls.from_pretrained(str(path), local_files_only=True).to(self.device).eval()
@@ -126,6 +146,8 @@ class HFAdapter(BaseAdapter):
 
     def forward(self, frame):
         import torch
+        if self.device.startswith("cuda"):
+            torch.cuda.set_device(self.device)
         rgb = cv2.cvtColor(frame.bgr, cv2.COLOR_BGR2RGB)
         th, tw = self._target_hw(rgb.shape[:2])
         # Preserve camera aspect ratio so flat ground is never distorted into vertical walls.
@@ -330,7 +352,7 @@ class OpenVinoYoloAdapter(OpenVinoBaseAdapter):
                     continue
                 raw_cls = self.names.get(int(row[5]), str(int(row[5])))
                 label = canonical(raw_cls, self.spec.label_map)
-                zone = "head" if y1 < h * .48 and y2 < h * .78 else "ground"
+                zone = _classify_zone(label, (x1, y1, x2, y2), (h, w))
                 detections.append(Detection(label, float(row[4]), (x1, y1, x2, y2), (self.spec.id,), zone=zone))
             return detections
 
@@ -365,7 +387,7 @@ class OpenVinoYoloAdapter(OpenVinoBaseAdapter):
                 continue
             raw_cls = self.names.get(int(cls_ids[idx]), str(int(cls_ids[idx])))
             label = canonical(raw_cls, self.spec.label_map)
-            zone = "head" if y1 < h * .48 and y2 < h * .78 else "ground"
+            zone = _classify_zone(label, (x1, y1, x2, y2), (h, w))
             detections.append(Detection(label, float(confs[idx]), (x1, y1, x2, y2), (self.spec.id,), zone=zone))
         return detections
 

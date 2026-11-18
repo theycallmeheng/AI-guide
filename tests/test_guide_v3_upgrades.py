@@ -277,22 +277,32 @@ class GuideV3UpgradeTests(unittest.TestCase):
         self.assertEqual(audio2.active["decision"].action, Action.SHIFT_RIGHT)
         self.assertEqual(audio2.active["start"], 1.0)
 
-    def test_smart_arbitration_debounce_flicker_and_asymmetric_cooldowns(self):
+    def test_smart_arbitration_strict_priority_turns_never_cut_by_slow_and_preempt_slow(self):
         audio = AudioTimeline(Bank(1.0), smart_arbitration=True, revocation_debounce_frames=2, earcon=True)
         audio.update(decision(Action.SHIFT_LEFT, 0.0), 0.0)
-        # 1-frame transient UNCLEAR flicker at 0.2s must NOT cut SHIFT_LEFT!
-        audio.update(decision(Action.UNCLEAR, 0.2), 0.2)
-        self.assertEqual(audio.active["decision"].action, Action.SHIFT_LEFT)
-        # Return to SHIFT_LEFT at 0.25s resets debounce counter.
-        audio.update(decision(Action.SHIFT_LEFT, 0.25), 0.25)
-        # 2 consecutive frames of UNCLEAR (0.4s, 0.5s) DO cut SHIFT_LEFT at 0.5s!
-        audio.update(decision(Action.UNCLEAR, 0.4), 0.4)
-        self.assertEqual(audio.active["decision"].action, Action.SHIFT_LEFT)
-        audio.update(decision(Action.UNCLEAR, 0.5), 0.5)
-        self.assertEqual(audio.segments[0]["end"], 0.5)
-        self.assertEqual(audio.active["decision"].action, Action.UNCLEAR)
+        # Multiple consecutive SLOW / UNCLEAR frames MUST NEVER cut active SHIFT_LEFT ("Lệch nhẹ sang trái")!
+        for t in (0.2, 0.3, 0.4, 0.5, 0.6):
+            audio.update(decision(Action.SLOW, t), t)
+            self.assertEqual(audio.active["decision"].action, Action.SHIFT_LEFT)
+            self.assertEqual(audio.active["end"], 1.0)
+        # Complete SHIFT_LEFT cleanly at t=1.0s; queued SLOW may then play once speaker is free.
+        audio.tick(1.0)
+        self.assertEqual(audio.segments[0]["end"], 1.0)
+        self.assertEqual(audio.active["decision"].action, Action.SLOW)
+        slow_start = audio.active["start"]
+
+        # Conversely, while SLOW ("Đi chậm lại", Tier 1) IS playing, incoming SHIFT_RIGHT (Tier 3)
+        # MUST preempt SLOW immediately so turn guidance is never delayed!
+        audio.update(decision(Action.SHIFT_RIGHT, slow_start + 0.3), slow_start + 0.3)
+        self.assertEqual(audio.active["decision"].action, Action.SHIFT_RIGHT)
+        self.assertEqual(audio.active["start"], slow_start + 0.3)
+        self.assertTrue(any(e["event"] == "cancelled" and e["reason"] == "preempted_by_priority_direction" for e in audio.events))
 
         # Asymmetric cooldown: UNCLEAR has 8.5s repeat cooldown, while delta direction change has 0s cooldown!
+        end_sr = audio.active["end"]
+        audio.tick(end_sr + 0.05)
+        audio.update(decision(Action.UNCLEAR, end_sr + 0.1), end_sr + 0.1)
+        self.assertEqual(audio.active["decision"].action, Action.UNCLEAR)
         end_unclear = audio.active["end"]
         audio.tick(end_unclear + 0.1)
         audio.update(decision(Action.UNCLEAR, end_unclear + 0.2), end_unclear + 0.2)
@@ -301,8 +311,78 @@ class GuideV3UpgradeTests(unittest.TestCase):
         self.assertEqual(audio.active["decision"].action, Action.KEEP_HEADING)  # New info -> 0s cooldown!
         end_kh = audio.active["end"]
         audio.tick(end_kh + 0.05)
-        audio.update(decision(Action.SHIFT_RIGHT, end_kh + 0.1), end_kh + 0.1)
-        self.assertEqual(audio.active["decision"].action, Action.SHIFT_RIGHT)  # KEEP_HEADING -> SHIFT_RIGHT: 0s!
+        audio.update(decision(Action.SHIFT_LEFT, end_kh + 0.1), end_kh + 0.1)
+        self.assertEqual(audio.active["decision"].action, Action.SHIFT_LEFT)  # KEEP_HEADING -> SHIFT_LEFT: 0s!
+
+    def test_auto_environment_and_smooth_obstacle_bypass_without_false_stop(self):
+        c = config(depth=True)
+        c.environment = "auto"
+        s = scene()
+        h, w = s.frame.bgr.shape[:2]
+        # Indoor ceramic floor in group_probs -> auto environment resolves to "indoor" and routes cleanly.
+        s.semantic["classes"][:] = 3  # "floor"
+        s.semantic["group_probs"] = {
+            "indoor": np.full((h, w), 0.92, dtype=np.float32),
+            "sidewalk": np.zeros((h, w), dtype=np.float32),
+            "alley": np.zeros((h, w), dtype=np.float32),
+            "structure": np.zeros((h, w), dtype=np.float32),
+        }
+        planner = CorridorPlanner(c)
+        policy = DecisionPolicy(c)
+        for n, t in enumerate([0.0, 0.15, 0.30, 0.45]):
+            sn = scene(n, t)
+            sn.semantic = s.semantic
+            d = policy.update(sn, planner.plan(sn), t, full=True)
+        self.assertEqual(d.action, Action.KEEP_HEADING)
+
+        # Now place a person on the left-center so route curves smoothly to SHIFT_RIGHT (no false STOP!).
+        actions = []
+        for idx, t in enumerate([0.60, 0.75, 0.90, 1.05], start=4):
+            sn = scene(idx, t)
+            sn.semantic = {
+                "classes": s.semantic["classes"].copy(),
+                "confidence": s.semantic["confidence"].copy(),
+                "labels": s.semantic["labels"],
+                "group_probs": {k: v.copy() for k, v in s.semantic["group_probs"].items()},
+            }
+            sn.detections = [Detection("person", 0.85, (10, 110, 155, 180), ("y",))]
+            r = planner.plan(sn)
+            self.assertEqual(r.action, Action.SHIFT_RIGHT)
+            d = policy.update(sn, r, t, full=True)
+            actions.append(d.action)
+        self.assertNotIn(Action.STOP, actions)
+        self.assertEqual(actions[-1], Action.SHIFT_RIGHT)
+        self.assertIn("tránh người bên trái", d.hazard_hint)
+
+    def test_post_stop_fast_recovery_for_latest_turn_without_replaying_old_turn(self):
+        audio = AudioTimeline(
+            Bank(1.0),
+            preempt_emergency=True,
+            smart_arbitration=True,
+            post_stop_hold_s=0.8,
+            post_stop_turn_hold_s=0.3,
+        )
+        # 1. Old SHIFT_LEFT starts at 0.0s and is cut by STOP at 0.25s; if no new turn arrives, old turn NEVER replays!
+        audio.update(decision(Action.SHIFT_LEFT, 0.0, ttl=2.0), 0.0)
+        audio.update(decision(Action.STOP, 0.25, ttl=0.7), 0.25)
+        self.assertEqual(audio.active["decision"].action, Action.STOP)
+        self.assertIsNone(audio.pending)
+        audio.tick(1.25)  # STOP finishes at 1.25s
+        audio.tick(1.60)
+        self.assertIsNone(audio.active)
+
+        # 2. Now SHIFT_RIGHT starts at 2.5s, STOP cuts it at 2.8s (plays 2.8..3.8s), and a FRESH escape turn
+        # SHIFT_RIGHT arrives at 3.55s (default ttl=0.7 -> valid_until=4.25s).
+        # With post_stop_turn_hold_s=0.3s, it deploys automatically at 3.8 + 0.3 = 4.10s (< 4.25s)!
+        audio.update(decision(Action.SHIFT_RIGHT, 2.5), 2.5)
+        audio.update(decision(Action.STOP, 2.8), 2.8)
+        audio.update(decision(Action.SHIFT_RIGHT, 3.55, ttl=0.7), 3.55)
+        audio.tick(3.80)  # STOP finishes at 3.80s
+        audio.tick(4.00)
+        self.assertIsNone(audio.active)  # Inside 0.30s breathing gap (3.80..4.10s)
+        audio.tick(4.11)
+        self.assertIsNotNone(audio.active)
+        self.assertEqual(audio.active["decision"].action, Action.SHIFT_RIGHT)
 
 
 if __name__ == "__main__":

@@ -89,14 +89,14 @@ def analyze_depth_geometry(near, valid, ground_hint=None):
             proposals.append(np.linalg.solve(sub,z[idx]))
         best_count=0
         for params in proposals:
-            if not (.14<=params[0]<=2.5 and abs(params[1])<=.50): continue
+            if not (.14<=params[0]<=2.5 and abs(params[1])<=.22): continue
             inliers=np.abs(A@params-z)<.085
             cnt=int(inliers.sum())
             if cnt>best_count:
                 best_count,best_inliers=cnt,inliers
         if best_inliers is not None and best_count>=max(24,int(.32*len(z))):
             refined,*_=np.linalg.lstsq(A[best_inliers],z[best_inliers],rcond=None)
-            if .12<=refined[0]<=2.6 and abs(refined[1])<=.55:
+            if .12<=refined[0]<=2.6 and abs(refined[1])<=.25:
                 best_params=refined
 
     dx=cv2.Sobel(near_f,cv2.CV_32F,1,0,ksize=3)
@@ -105,16 +105,21 @@ def analyze_depth_geometry(near, valid, ground_hint=None):
     kernel2=np.ones((2,2),np.uint8)
 
     if best_params is not None:
-        plane_s=best_params[0]*v_s+best_params[1]*u_s+best_params[2]
+        plane_s=np.clip(best_params[0]*v_s+best_params[1]*u_s+best_params[2],0.,1.)
         res_s=near_s-plane_s
-        pos_s=cv2.morphologyEx(((res_s>.18)&(v_s>=.42)&valid_s).astype(np.uint8),cv2.MORPH_OPEN,kernel2)
-        drop_s=cv2.morphologyEx(((res_s<-.18)&(v_s>=.52)&valid_s).astype(np.uint8),cv2.MORPH_OPEN,kernel2)
+        v_pos_min=.22 if h>w else .42
+        pos_s=cv2.morphologyEx(((res_s>.18)&(v_s>=v_pos_min)&valid_s).astype(np.uint8),cv2.MORPH_OPEN,kernel2)
+        dy_s=cv2.Sobel(near_s,cv2.CV_32F,0,1,ksize=3)
+        below_cliff=np.maximum.accumulate((dy_s<-.12)&(v_s>=.38),axis=0)
+        drop_raw=(res_s<-.18)&(near_s<.72)&(v_s>=.52)&valid_s&below_cliff
+        drop_s=cv2.morphologyEx(drop_raw.astype(np.uint8),cv2.MORPH_OPEN,kernel2)
         pos_full=cv2.resize(pos_s,(w,h),interpolation=cv2.INTER_NEAREST).astype(bool)
         drop_full=cv2.resize(drop_s,(w,h),interpolation=cv2.INTER_NEAREST).astype(bool)
         res_full=cv2.resize(res_s,(w,h),interpolation=cv2.INTER_LINEAR)
         cliff=((grad>.95)&(np.abs(res_full)>.11)).astype(np.uint8)
         uncertain=cv2.dilate(cliff,np.ones((3,3),np.uint8)).astype(bool)
-        return {"positive":pos_full,"dropoff":drop_full,"uncertain":uncertain,"plane_valid":True}
+        return {"positive":pos_full,"dropoff":drop_full,"uncertain":uncertain,"plane_valid":True,
+                "residual":res_full,"grad":grad,"plane_slope":float(best_params[0])}
 
     pos_full=np.zeros((h,w),dtype=bool)
     c_patch=near_s[int(gh_d*.55):int(gh_d*.95),int(gw_d*.35):int(gw_d*.65)]
@@ -122,7 +127,8 @@ def analyze_depth_geometry(near, valid, ground_hint=None):
         pos_full[int(h*.55):int(h*.95),int(w*.35):int(w*.65)]=True
     edges=(grad>.75).astype(np.uint8)
     uncertain=cv2.dilate(edges,np.ones((3,3),np.uint8)).astype(bool)
-    return {"positive":pos_full,"dropoff":np.zeros((h,w),dtype=bool),"uncertain":uncertain,"plane_valid":False}
+    return {"positive":pos_full,"dropoff":np.zeros((h,w),dtype=bool),"uncertain":uncertain,"plane_valid":False,
+            "residual":None,"grad":grad,"plane_slope":0.}
 
 def urgent_reason(scene, ttc_stop_s=1.6, head_enabled=True, depth_enabled=True):
     h,w=scene.frame.bgr.shape[:2]
@@ -139,6 +145,10 @@ def urgent_reason(scene, ttc_stop_s=1.6, head_enabled=True, depth_enabled=True):
         # 1. Near ground/body obstacle in central corridor.
         if x1<w*.62 and x2>w*.38 and y2>h*.80 and (y2-y1>h*.18 or y2>h*.92):
             return True,"near_center_obstacle",_vi_label(obj.label)
+        # 1b. Wide transverse stairs / step / barrier blocking forward path.
+        if obj.label in {"stairs","step","barrier"} and (x2-x1)>=w*.55 and x1<w*.45 and x2>w*.55:
+            if y2>=h*(.52 if h>w else .68):
+                return True,"near_stairs_hazard",f"{_vi_label(obj.label)} phía trước"
         # 2. Rapidly approaching obstacle via Looming Time-To-Collision (TTC).
         ttc=getattr(obj,"ttc_s",None)
         if ttc is not None and 0<ttc<=ttc_stop_s and obj.confidence>=.45 and y2>h*.48:
@@ -146,7 +156,7 @@ def urgent_reason(scene, ttc_stop_s=1.6, head_enabled=True, depth_enabled=True):
             if min(x1,x1+vx)<w*.65 and max(x2,x2+vx)>w*.35:
                 return True,"approaching_obstacle_ttc",f"{_vi_label(obj.label)} đang tiến gần"
         # 3. Overhanging / head-to-chest hazard fused with depth proximity.
-        if head_enabled and x1<w*.60 and x2>w*.40 and y1<h*.48 and h*.28<=y2<=h*.80:
+        if head_enabled and getattr(obj,"zone","ground")=="head" and x1<w*.60 and x2>w*.40 and y1<h*.48 and h*.28<=y2<=h*.80:
             big_box=(y2-y1)>=h*.20 or (x2-x1)>=w*.28
             if big_box and depth_near is not None:
                 patch=depth_near[max(0,int(y1)):min(h,int(y2)),max(0,int(x1)):min(w,int(x2))]
@@ -199,11 +209,39 @@ class CorridorPlanner:
         self._prev_walk=None
         self._prev_session=None
         self._prev_pts=None
+        self._env_session=None
+        self._indoor_ema=0.
+        self._alley_ema=0.
 
     def reset(self):
         self._prev_walk=None
         self._prev_session=None
         self._prev_pts=None
+
+    def _resolve_environment(self,sem,session):
+        gp=sem.get("group_probs")
+        h=sem["classes"].shape[0]
+        al_now=0.
+        if gp and "indoor" in gp and "alley" in gp and "sidewalk" in gp:
+            sl=slice(int(h*.45),int(h*.96))
+            in_now=float(gp["indoor"][sl].mean())
+            al_now=float(gp["alley"][sl].mean())
+            sw_now=float(gp["sidewalk"][sl].mean())
+            if session!=self._env_session:
+                self._indoor_ema=in_now
+                self._alley_ema=al_now-sw_now
+                self._env_session=session
+            else:
+                in_alpha=.45 if in_now>=self._indoor_ema else .12
+                self._indoor_ema=in_alpha*in_now+(1.-in_alpha)*self._indoor_ema
+                self._alley_ema=.35*(al_now-sw_now)+.65*self._alley_ema
+        if self.config.environment!="auto":
+            return self.config.environment
+        if self._indoor_ema>=max(.18,al_now*1.15):
+            return "indoor"
+        if self._alley_ema>=.06:
+            return "alley"
+        return "sidewalk"
 
     def plan(self,scene):
         c=self.config
@@ -224,13 +262,14 @@ class CorridorPlanner:
         if confidence.shape!=ids.shape or not np.isfinite(confidence).all():
             self.reset(); return empty("invalid_semantic")
         h,w=ids.shape
+        eff_env=self._resolve_environment(sem,scene.frame.session)
         names={int(k):str(v).lower().strip() for k,v in sem["labels"].items()}
-        ground_ids=[k for k,v in names.items() if v in GROUND[c.environment]]
+        ground_ids=[k for k,v in names.items() if v in GROUND[eff_env]]
         structure_ids=[k for k,v in names.items() if v in STRUCTURES]
 
         gp=sem.get("group_probs")
-        if gp and c.environment in gp and gp[c.environment].shape==(h,w):
-            walk_prob=gp[c.environment].astype(np.float32,copy=True)
+        if gp and eff_env in gp and gp[eff_env].shape==(h,w):
+            walk_prob=gp[eff_env].astype(np.float32,copy=True)
             struct_prob=gp["structure"] if "structure" in gp else np.where(np.isin(ids,structure_ids),confidence,0.)
             blocked=struct_prob>=c.semantic_threshold
         else:
@@ -247,9 +286,6 @@ class CorridorPlanner:
             alpha=float(c.temporal_ema_alpha)
             has_prior=warped>.05
             walk_prob=np.where(has_prior,alpha*walk_prob+(1.-alpha)*warped,walk_prob)
-        self._prev_walk=walk_prob.copy()
-        self._prev_session=frame.session
-        self._prev_pts=frame.pts
 
         depth_required=any(m.enabled and m.role=="depth" for m in c.models)
         if depth_required:
@@ -260,15 +296,35 @@ class CorridorPlanner:
             if valid.shape!=ids.shape or valid.mean()<.95: return empty("invalid_depth")
             anomalies=analyze_depth_geometry(near,valid,ground_hint=walk_prob>=c.semantic_threshold)
             scene.depth_anomalies=anomalies
+            # 3D Coplanar Specular-Tile Recovery: glossy indoor floor tiles often trigger false 2D "wall"/"ceiling"
+            # predictions despite lying strictly flat on the verified 3D RANSAC ground plane.
+            if (eff_env=="indoor" and gp and self._indoor_ema>=.25
+                    and anomalies.get("plane_valid") and anomalies.get("plane_slope",0.)>=.30
+                    and anomalies.get("residual") is not None):
+                ambiguous_ids=[k for k,v in names.items() if v in {"wall","ceiling","screen door","building"}]
+                if ambiguous_ids:
+                    coplanar=(valid & np.isin(ids,ambiguous_ids) & (np.abs(anomalies["residual"])<.095)
+                              & (anomalies["grad"]<.36) & ~anomalies["positive"]
+                              & ~anomalies["dropoff"] & ~anomalies["uncertain"])
+                    walk_prob=np.where(coplanar,np.maximum(walk_prob,np.clip(confidence,.65,.88)),walk_prob)
+                    blocked=blocked&~coplanar
             if c.depth_obstacle_enabled:
                 blocked|=anomalies["positive"]|anomalies["dropoff"]
             walk_prob=np.where(valid & ~anomalies["uncertain"],walk_prob,0.)
+
+        self._prev_walk=walk_prob.copy()
+        self._prev_session=frame.session
+        self._prev_pts=frame.pts
 
         blocked|=obstacle_mask(scene,c.predict_horizon_s)
         walk_prob[blocked]=0.
         free=walk_prob>=c.semantic_threshold
 
         y0,y1=int(h*.45),int(h*.96)
+        if h>w:
+            y_ext=int(h*.22)
+            if float(free[y_ext:y0].mean())>=.18:
+                y0=y_ext
         gw,gh=c.grid_width,c.grid_height
         grid_prob=cv2.resize(walk_prob[y0:y1],(gw,gh),interpolation=cv2.INTER_AREA)
         grid_cov=cv2.resize(free[y0:y1].astype(np.float32),(gw,gh),interpolation=cv2.INTER_AREA)
@@ -336,15 +392,17 @@ class CorridorPlanner:
         for i in range(len(points)-1):
             radius=max(2,round(c.margin_bottom_cells*w/gw))
             cv2.line(corridor,points[i],points[i+1],1,2*radius)
-        shift=(np.mean([p[0] for p in points[len(points)//2:]])/w-.5)
-        action=Action.SHIFT_LEFT if shift<-.08 else Action.SHIFT_RIGHT if shift>.08 else Action.KEEP_HEADING
+        upper_x=float(np.mean([p[0] for p in points[len(points)//2:]]))
+        start_x=float(points[0][0])
+        shift=.65*(upper_x/w-.5)+.35*((upper_x-start_x)/w)
+        action=Action.SHIFT_LEFT if shift<-.058 else Action.SHIFT_RIGHT if shift>.058 else Action.KEEP_HEADING
         clock_hour=_clock_from_shift(shift)
         # Evaluate corridor width over the near/mid body path (excluding the far horizon termination tip).
         body_span=path_clearances[:max(1,int(len(path_clearances)*.85))]
         bottleneck=float(min(body_span)) if body_span else float(score[top_y,best])
         narrow=bottleneck<c.margin_bottom_cells+.35
         reason="narrow_corridor" if narrow else "continuous_ground"
-        if c.environment=="alley":
+        if eff_env=="alley":
             road_present=(gp and "alley" in gp and "sidewalk" in gp and float(np.mean(gp["alley"]-gp["sidewalk"]))>.02) or any(
                 v=="road" and np.any(ids==k) for k,v in names.items()
             )

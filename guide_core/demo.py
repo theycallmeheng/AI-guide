@@ -55,7 +55,12 @@ def run(config,video,output,seconds=None,progress=True):
     rss=[]
     def memory():
         rss.append(process.memory_info().rss/1024**2)
-    if torch.cuda.is_available(): torch.cuda.reset_peak_memory_stats()
+    if torch.cuda.is_available() and torch.cuda.is_initialized():
+        for _dev in range(torch.cuda.device_count()):
+            try:
+                torch.cuda.reset_peak_memory_stats(_dev)
+            except RuntimeError:
+                pass
     engine=GuideEngine(config)
     load_start=time.perf_counter()
     try:
@@ -70,6 +75,7 @@ def run(config,video,output,seconds=None,progress=True):
         preempt_emergency=config.preempt_emergency_audio,
         smart_arbitration=config.smart_arbitration,
         post_stop_hold_s=config.post_stop_hold_s,
+        post_stop_turn_hold_s=config.post_stop_turn_hold_s,
         tail_grace_s=config.tail_grace_s,
         revocation_debounce_frames=config.revocation_debounce_frames,
         earcon=config.earcon_enabled,
@@ -195,7 +201,7 @@ def run(config,video,output,seconds=None,progress=True):
             for record in audio.events if audio else []: f.write(json.dumps(record,ensure_ascii=False)+"\n")
         (output/"speech_segments.json").write_text(json.dumps([
             {"start":s["start"],"end":s["end"],"action":s["decision"].action.value,
-             "evidence":s["decision"].record()} for s in audio.segments] if audio else [],
+             "pan":round(float(s.get("pan",0.0)),3),"evidence":s["decision"].record()} for s in audio.segments] if audio else [],
              ensure_ascii=False,indent=2),encoding="utf-8")
         import imageio_ffmpeg
         cmd=[imageio_ffmpeg.get_ffmpeg_exe(),"-y","-loglevel","error","-i",str(output/"preview_raw.mp4")]
@@ -207,6 +213,15 @@ def run(config,video,output,seconds=None,progress=True):
         versions={}
         for name in ("torch","ultralytics","transformers","opencv-python","numpy","imageio-ffmpeg"):
             versions[name]=importlib.metadata.version(name)
+        cuda_alloc_by_dev={}
+        cuda_res_vals=[]
+        if torch.cuda.is_available() and torch.cuda.is_initialized():
+            for i in range(torch.cuda.device_count()):
+                try:
+                    cuda_alloc_by_dev[f"cuda:{i}"]=round(torch.cuda.max_memory_allocated(i)/1024**2,2)
+                    cuda_res_vals.append(torch.cuda.max_memory_reserved(i)/1024**2)
+                except RuntimeError:
+                    pass
         report={
             "status":"unlabelled_smoke_or_demo_not_acceptance","mode":config.mode,
             "video":str(video),"video_sha256":fingerprint(video),"video_duration_s":duration,
@@ -220,8 +235,9 @@ def run(config,video,output,seconds=None,progress=True):
             "model_ms":{k:distribution(v) for k,v in engine.timings.items()},
             "model_fps":{k:1000/np.mean(v) if v and np.mean(v)>0 else None for k,v in engine.timings.items()},
             "rss_peak_sampled_mb":max(rss,default=0),
-            "cuda_peak_allocated_mb":torch.cuda.max_memory_allocated()/1024**2 if torch.cuda.is_available() else None,
-            "cuda_peak_reserved_mb":torch.cuda.max_memory_reserved()/1024**2 if torch.cuda.is_available() else None,
+            "cuda_peak_allocated_mb":max(cuda_alloc_by_dev.values(),default=None),
+            "cuda_peak_reserved_mb":max(cuda_res_vals,default=None),
+            "cuda_peak_allocated_by_device_mb":cuda_alloc_by_dev,
             "device_names":[torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())],
             "versions":versions,"model_sha256":{m.id:fingerprint(m.path) for m in config.models if m.enabled},
             "load_failures":engine.failures,"action_counts":dict(counts),"source":stats,"stale_outputs":stale_count,
@@ -244,7 +260,7 @@ def main():
     p.add_argument("--config",required=True);p.add_argument("--video",required=True)
     p.add_argument("--output",required=True);p.add_argument("--seconds",type=float)
     p.add_argument("--mode",choices=["offline","realtime_replay"])
-    p.add_argument("--environment",choices=["alley","sidewalk","indoor"])
+    p.add_argument("--environment",choices=["auto","alley","sidewalk","indoor"])
     p.add_argument("--no-audio",action="store_true")
     args=p.parse_args()
     config=Config.read(args.config)

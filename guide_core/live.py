@@ -243,7 +243,7 @@ class CoreInferenceWorker(threading.Thread):
             cfg = Config.read(self.core_config_path)
             cfg.mode = "realtime_replay"
             cfg.mirror_input = self.mirror_input
-            if self.environment in {"sidewalk", "alley", "indoor"}:
+            if self.environment in {"auto", "sidewalk", "alley", "indoor"}:
                 cfg.environment = self.environment
             for m in cfg.models:
                 p = Path(m.path)
@@ -270,6 +270,7 @@ class CoreInferenceWorker(threading.Thread):
                     preempt_emergency=cfg.preempt_emergency_audio,
                     smart_arbitration=cfg.smart_arbitration,
                     post_stop_hold_s=cfg.post_stop_hold_s,
+                    post_stop_turn_hold_s=cfg.post_stop_turn_hold_s,
                     tail_grace_s=cfg.tail_grace_s,
                     revocation_debounce_frames=cfg.revocation_debounce_frames,
                     earcon=cfg.earcon_enabled,

@@ -6,13 +6,13 @@ from .types import Action, DIRECTIONAL, SIDE_GUIDANCE, SPEECH_PRIORITY
 
 CLIPS={a:a.value.lower()+".wav" for a in Action}
 
-# 4-Tier Survival & Cognitive Load Hierarchy
+# 4-Tier Survival & Cognitive Load Hierarchy (Strict Monotonic Priority: 4 > 3 > 2 > 1)
 ARBITRATION_TIER = {
-    Action.STOP: 4,          # Tier P4: Critical survival reflex
-    Action.SHIFT_LEFT: 2,    # Tier P2: Active lateral steering
-    Action.SHIFT_RIGHT: 2,
-    Action.KEEP_HEADING: 2,  # Tier P2: Heading confirmation
-    Action.SLOW: 1,          # Tier P1: Cautious ambient status
+    Action.STOP: 4,          # Tier P4: Critical survival reflex ("Dừng lại.")
+    Action.SHIFT_LEFT: 3,    # Tier P3: Active lateral steering ("Lệch nhẹ sang trái.")
+    Action.SHIFT_RIGHT: 3,   # Tier P3: Active lateral steering ("Lệch nhẹ sang phải.")
+    Action.KEEP_HEADING: 2,  # Tier P2: Safe heading confirmation ("Giữ hướng, đi chậm.")
+    Action.SLOW: 1,          # Tier P1: Routine cautious status ("Đi chậm lại.")
     Action.UNCLEAR: 1,
 }
 
@@ -110,6 +110,7 @@ class AudioTimeline:
         preempt_emergency=False,
         smart_arbitration=False,
         post_stop_hold_s=.8,
+        post_stop_turn_hold_s=.30,
         tail_grace_s=.15,
         revocation_debounce_frames=2,
         action_cooldowns=None,
@@ -122,6 +123,7 @@ class AudioTimeline:
         self.smart_arbitration=bool(smart_arbitration)
         self.preempt_emergency=bool(preempt_emergency or smart_arbitration)
         self.post_stop_hold_s=float(post_stop_hold_s) if self.smart_arbitration else 0.
+        self.post_stop_turn_hold_s=float(min(post_stop_turn_hold_s,post_stop_hold_s)) if self.smart_arbitration else 0.
         self.tail_grace_s=float(tail_grace_s) if self.smart_arbitration else 0.
         self.revocation_debounce_frames=max(1,int(revocation_debounce_frames))
         self.action_cooldowns=dict(DEFAULT_ACTION_COOLDOWNS if action_cooldowns is None else action_cooldowns)
@@ -185,9 +187,12 @@ class AudioTimeline:
         return self.repeat_s
 
     def _in_post_stop_hold(self, action, now):
-        if not self.smart_arbitration or action == Action.STOP or self.post_stop_hold_s <= 0:
+        if not self.smart_arbitration or action == Action.STOP:
             return False
-        return (now - self.last_stop_ended_at) < self.post_stop_hold_s - 1e-9
+        hold_s = self.post_stop_turn_hold_s if action in SIDE_GUIDANCE else self.post_stop_hold_s
+        if hold_s <= 0:
+            return False
+        return (now - self.last_stop_ended_at) < hold_s - 1e-9
 
     def _can_start(self, decision, now):
         action = decision.action
@@ -238,11 +243,12 @@ class AudioTimeline:
                   submission_ms=submission_ms,pan=pan)
 
     def _should_preempt_active_direction(self, decision, now):
-        """Rule P3: Cut active directional speech ONLY when contradicted or revoked before tail_grace_s."""
+        """Rule P3: Strict priority preemption — higher-tier lateral turns preempt lower-tier SLOW/UNCLEAR/KEEP_HEADING,
+        and opposite-side turns preempt contradicted turns; lower-tier SLOW/UNCLEAR NEVER cut active turns."""
         if not self.smart_arbitration or self.active is None:
             return None
         active_action = self.active["decision"].action
-        if active_action not in DIRECTIONAL:
+        if active_action == Action.STOP:
             return None
         remaining_s = self.active["end"] - now
         if remaining_s <= self.tail_grace_s:
@@ -250,24 +256,20 @@ class AudioTimeline:
             return None
 
         new_action = decision.action
-        # Case 3a: Confirmed lateral direction flipped to the opposite side (SHIFT_LEFT <-> SHIFT_RIGHT).
+        # Case 3a: Confirmed lateral turn (Tier 3) preempts lower-tier status speech (Tier 1 SLOW/UNCLEAR or Tier 2 KEEP_HEADING).
+        if new_action in SIDE_GUIDANCE and ARBITRATION_TIER.get(new_action, 1) > ARBITRATION_TIER.get(active_action, 1):
+            if self._can_start(decision, now):
+                self._contradiction_count = 0
+                return "preempted_by_priority_direction"
+            return None
+
+        # Case 3b: Confirmed lateral direction flipped to the opposite side (SHIFT_LEFT <-> SHIFT_RIGHT).
         if active_action in SIDE_GUIDANCE and new_action in SIDE_GUIDANCE and new_action != active_action:
             self._contradiction_count = 0
             return "preempted_contradicted_direction"
 
-        # Case 3b: Active lateral steering (SHIFT_LEFT/RIGHT) is actively invalidated or lost.
-        hard_revoked = bool(decision.invalidates_route or decision.reason in REVOCATION_REASONS)
-        if hard_revoked:
-            self._contradiction_count = 0
-            return "preempted_revoked_direction"
-
-        if active_action in SIDE_GUIDANCE and new_action not in DIRECTIONAL:
-            self._contradiction_count += 1
-            if self._contradiction_count >= self.revocation_debounce_frames:
-                self._contradiction_count = 0
-                return "preempted_revoked_direction"
-            return None
-
+        # Lower-tier commands (SLOW / UNCLEAR / KEEP_HEADING) NEVER cut an active lateral turn (SHIFT_LEFT / SHIFT_RIGHT).
+        # Genuine hazards/route losses already emit Action.STOP (Tier 4), which preempts via Rule P4 above.
         self._contradiction_count = 0
         return None
 
@@ -319,15 +321,21 @@ class AudioTimeline:
         if self.pending:
             pending = self.pending
             expired = pending.valid_until < now
+            confirming_same = (
+                self.smart_arbitration
+                and decision.reason in {"confirming_corridor", "waiting_context"}
+                and (decision.route is None or decision.route.action == pending.action)
+            )
             revoked = pending.frame_key[0] != decision.frame_key[0] or (
                 pending.action in DIRECTIONAL
+                and not confirming_same
                 and (pending.action != decision.action or decision.invalidates_route)
             )
             if expired or revoked:
                 self._log("expired" if expired else "pending_replaced", now, pending)
                 self._clear_pending()
             elif self.smart_arbitration and ARBITRATION_TIER.get(pending.action, 1) > ARBITRATION_TIER.get(decision.action, 1):
-                # Higher survival tier (e.g. fresh STOP) in mailbox cannot be displaced by ambient SLOW/UNCLEAR.
+                # Higher survival/steering tier in mailbox cannot be displaced by ambient SLOW/UNCLEAR.
                 self.tick(now)
                 return
             elif self.smart_arbitration and pending.action == Action.SLOW and decision.action == Action.UNCLEAR and pending.hazard_hint:
@@ -342,6 +350,14 @@ class AudioTimeline:
             elif pending.action != decision.action:
                 self._log("pending_replaced", now, pending)
                 self._clear_pending()
+
+        # In smart_arbitration, hold off queuing transient 0.4s pre-confirmation SLOW chatter so the
+        # upcoming confirmed direction (SHIFT_LEFT/RIGHT or KEEP_HEADING) gets an idle speaker immediately.
+        if (self.smart_arbitration and decision.action == Action.SLOW
+                and decision.reason in {"confirming_corridor", "waiting_context"}):
+            self.tick(now)
+            return
+
         if self.active is None or self.active["decision"].action != decision.action:
             self._queue(decision, now)
         self.tick(now)

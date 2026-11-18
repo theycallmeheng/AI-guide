@@ -481,7 +481,9 @@ def render_analysis(analysis):
 
 def open_camera(index: int, width: int = 640, height: int = 480, fps: int = 60) -> cv2.VideoCapture | None:
     """Open a webcam using the available Windows capture backends."""
-    backends = (cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_ANY) if os.name == "nt" else (cv2.CAP_ANY,)
+    # DroidCam exposes a DirectShow virtual camera on Windows. MSMF can open the
+    # device but return a green/blank frame on some driver versions, so try DShow first.
+    backends = (cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY) if os.name == "nt" else (cv2.CAP_ANY,)
     for backend in backends:
         camera = cv2.VideoCapture(index, backend)
         if not camera.isOpened():
@@ -490,6 +492,8 @@ def open_camera(index: int, width: int = 640, height: int = 480, fps: int = 60) 
         camera.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         camera.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         camera.set(cv2.CAP_PROP_FPS, fps)
+        if hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
+            camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         for _ in range(5):
             ok, _frame = camera.read()
             if ok:

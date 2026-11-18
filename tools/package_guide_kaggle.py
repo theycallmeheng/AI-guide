@@ -15,7 +15,10 @@ def build(output,video=None,models=True):
     output=inside(output)
     included=set()
     for directory,pattern in (("guide_core","*.py"),("configs","guide_*.json"),("assets/audio/guide_core/khanh_vy","*.wav")):
-        included.update(ROOT.joinpath(directory).glob(pattern))
+        for candidate in ROOT.joinpath(directory).glob(pattern):
+            if directory == "configs" and candidate.name.startswith("guide_openvino_"):
+                continue
+            included.add(candidate)
     for name in ("requirements-guide-core.txt","GUIDE_V2.md","GUIDE_V2_REPORT.md","kaggle_demo_yolo_segformer.ipynb",
                  "tools/compare_guide_models.py","tools/download_guide_depth.py","tools/check_guide_environment.py",
                  "tools/annotate_guide.html","tools/check_guide_splits.py",

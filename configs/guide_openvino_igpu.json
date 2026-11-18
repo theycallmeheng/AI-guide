@@ -41,6 +41,7 @@
   "preempt_emergency_audio": true,
   "smart_arbitration": true,
   "post_stop_hold_s": 0.8,
+  "post_stop_turn_hold_s": 0.3,
   "tail_grace_s": 0.15,
   "revocation_debounce_frames": 2,
   "earcon_enabled": true,

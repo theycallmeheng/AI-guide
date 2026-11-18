@@ -16,7 +16,7 @@ from performance import Measurements
 APP_DIR = Path(__file__).resolve().parent
 
 def default_model():
-    return next((p for p in (APP_DIR/"models/results/best.pt", APP_DIR/"models/walkway_obstacles.pt",
+    return next((p for p in (APP_DIR/"models/results/yolo26n_best.pt", APP_DIR/"models/results/best.pt", APP_DIR/"models/walkway_obstacles.pt",
                             APP_DIR/"models/yolo11n.pt", APP_DIR/"yolo11n.pt") if p.is_file()),
                 APP_DIR/"models/yolo11n.pt")
 

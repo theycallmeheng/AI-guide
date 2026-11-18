@@ -215,3 +215,11 @@ Lần đầu giữ `RUN_MODE="smoke"` để kiểm tra 20 optimizer steps, valid
 Bản này dùng một GPU, ảnh 384, batch 1 và gradient accumulation 4; thu nhỏ ảnh/mask từng ảnh ra ổ đĩa, tính IoU từ ma trận đếm từng batch, ghi RAM/VRAM vào `memory_log.jsonl`. Dùng Transformers 4.57.1 cố định và giữ PyTorch có sẵn của Kaggle. File mô hình full nằm ở `/kaggle/working/segformer_sidewalk_best.zip`; checkpoint để resume nằm trong `segformer_sidewalk_full_checkpoints/`. `TRAINING_COMPLETED` xác nhận đã hoàn tất cả train, test và export.
 
 Nguồn được duy trì tại [tools/train_sidewalk_segformer_kaggle.py](tools/train_sidewalk_segformer_kaggle.py); [tools/build_sidewalk_notebook.py](tools/build_sidewalk_notebook.py) dựng lại notebook độc lập từ script này. Đầu ra SegFormer là thư mục Hugging Face với `model.safetensors`, không tự thay detector ROD của ứng dụng.
+
+## Cài trên máy clone và dùng DroidCam
+
+Ứng dụng tự chọn cấu hình Guide v3 và model YOLO26n ROD khi các tệp model có trong thư mục dự án. Không cần chọn từng model để chạy. Nếu Guide v3 chưa có đủ model, giao diện tự chuyển sang cấu hình khả dụng và báo lỗi rõ khi model thiếu.
+
+DroidCam là webcam ảo, vì vậy mỗi máy cần cài riêng ứng dụng DroidCam trên iPhone và client/driver Windows từ [trang chính thức](https://droidcam.app/windows/). Mở ứng dụng trên điện thoại và client trên Windows, kết nối theo hướng dẫn của DroidCam, rồi trong Guide chọn **Quét camera**. Chỉ số webcam có thể khác trên mỗi máy. Guide hiện thử DirectShow trước, là backend thường dùng cho webcam ảo Windows, rồi mới thử MSMF.
+
+Nếu camera chưa hiện, xác nhận client DroidCam trên Windows đã báo kết nối, đóng ứng dụng khác đang giữ camera, kiểm tra quyền Camera của Windows cho ứng dụng desktop, rồi quét lại. Kết nối IP cần dùng URL stream do ứng dụng camera cung cấp. Mã dự án không thể cài thay driver webcam ảo trên máy clone.

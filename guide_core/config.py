@@ -42,6 +42,7 @@ class Config:
     preempt_emergency_audio: bool = False
     smart_arbitration: bool = False
     post_stop_hold_s: float = .8
+    post_stop_turn_hold_s: float = .30
     tail_grace_s: float = .15
     revocation_debounce_frames: int = 2
     earcon_enabled: bool = False
@@ -59,7 +60,7 @@ class Config:
         for role in ("semantic", "depth"):
             if sum(m.role == role for m in active) > 1:
                 raise ValueError("Select one active " + role + " provider.")
-        if self.environment not in {"sidewalk", "alley", "indoor"}:
+        if self.environment not in {"auto", "sidewalk", "alley", "indoor"}:
             raise ValueError("Unknown environment.")
         if self.mode not in {"offline", "realtime_replay"}:
             raise ValueError("Unknown mode.")
@@ -73,7 +74,9 @@ class Config:
             raise ValueError("Invalid corridor horizon or temporal smoothing.")
         if not .3 <= self.ttc_stop_s <= 5.0:
             raise ValueError("Invalid TTC stop threshold.")
-        if not 0. <= self.post_stop_hold_s <= 3.0 or not 0. <= self.tail_grace_s <= .5 or self.revocation_debounce_frames < 1:
+        if (not 0. <= self.post_stop_turn_hold_s <= self.post_stop_hold_s <= 3.0
+                or not 0. <= self.tail_grace_s <= .5
+                or self.revocation_debounce_frames < 1):
             raise ValueError("Invalid audio arbitration timing parameters.")
         for m in active:
             if m.role not in {"detector", "semantic", "depth"} or not 0 < m.confidence <= 1 or m.imgsz < 64:
