@@ -162,7 +162,7 @@ class ObstacleGuideApp:
             row.pack_forget()
         row = self.video_row if self.source.get() == "Video đã ghi" else self.ip_row if self.source.get() == "Camera IP" else self.camera_row
         row.pack(fill="x", pady=7, before=self.source_hint)
-        self.source_hint.configure(text="Mở DroidCam trên iPhone và client Windows, rồi chọn chỉ số webcam ảo. Có thể nhập chỉ số trực tiếp." if row is self.camera_row else "Chọn video cục bộ." if row is self.video_row else "Luồng IP chỉ mang ảnh RGB, không chứa LiDAR.")
+        self.source_hint.configure(text="Đặt iPhone dọc trong DroidCam. Ứng dụng yêu cầu khung dọc 480×640 và tự cắt giữa ảnh nếu driver vẫn gửi khung ngang. Chọn chỉ số webcam ảo sau khi quét." if row is self.camera_row else "Chọn video cục bộ." if row is self.video_row else "Luồng IP chỉ mang ảnh RGB, không chứa LiDAR.")
 
     def choose_model(self):
         path = filedialog.askopenfilename(filetypes=(("YOLO / ONNX", "*.pt *.onnx"), ("Mọi tệp", "*.*")))
@@ -250,7 +250,11 @@ class ObstacleGuideApp:
             frame = None
         if frame is not None:
             image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            image.thumbnail((max(640, self.preview.winfo_width()), max(360, self.preview.winfo_height())), Image.Resampling.BILINEAR)
+            target_width = max(1, self.preview.winfo_width())
+            target_height = max(1, self.preview.winfo_height())
+            scale = min(target_width / image.width, target_height / image.height)
+            display_size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+            image = image.resize(display_size, Image.Resampling.BILINEAR)
             self._photo = ImageTk.PhotoImage(image)
             self.preview.configure(image=self._photo, text="")
         elif packet is None and preview is None and self._photo is not None:

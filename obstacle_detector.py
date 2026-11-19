@@ -479,7 +479,7 @@ def render_analysis(analysis):
     return _draw_unicode_labels(frame, labels)
 
 
-def open_camera(index: int, width: int = 640, height: int = 480, fps: int = 60) -> cv2.VideoCapture | None:
+def open_camera(index: int, width: int = 480, height: int = 640, fps: int = 60) -> cv2.VideoCapture | None:
     """Open a webcam using the available Windows capture backends."""
     # DroidCam exposes a DirectShow virtual camera on Windows. MSMF can open the
     # device but return a green/blank frame on some driver versions, so try DShow first.
@@ -532,6 +532,32 @@ def open_ip_stream(url: str) -> cv2.VideoCapture | None:
     return None
 
 
+def _trim_camera_letterbox(frame: np.ndarray) -> np.ndarray:
+    """Remove substantial near-black bars embedded by virtual camera feeds."""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    height, width = gray.shape
+    active = gray > 18
+    min_active = max(4, round(min(height, width) * 0.02))
+
+    top = 0
+    while top < height // 4 and int(active[top].sum()) < min_active:
+        top += 1
+    bottom = height
+    while height - bottom < height // 4 and int(active[bottom - 1].sum()) < min_active:
+        bottom -= 1
+    left = 0
+    while left < width // 4 and int(active[:, left].sum()) < min_active:
+        left += 1
+    right = width
+    while width - right < width // 4 and int(active[:, right - 1].sum()) < min_active:
+        right -= 1
+
+    if top >= 4 or height - bottom >= 4 or left >= 4 or width - right >= 4:
+        if bottom - top >= height // 2 and right - left >= width // 2:
+            return frame[top:bottom, left:right]
+    return frame
+
+
 class CameraCapture(threading.Thread):
     def __init__(
         self,
@@ -568,8 +594,12 @@ class CameraCapture(threading.Thread):
                 self.stop_event.set()
                 return
 
-            camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            if isinstance(self.source, int):
+                camera.set(cv2.CAP_PROP_FRAME_WIDTH, 480)
+                camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 640)
+            else:
+                camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             is_video = isinstance(self.source, str) and not self.live_stream
             fps = float(camera.get(cv2.CAP_PROP_FPS)) if is_video else 0.0
@@ -599,6 +629,13 @@ class CameraCapture(threading.Thread):
                     self.stop_event.set()
                     self.events.put({"type": "source_finished", "text": text})
                     break
+                if isinstance(self.source, int):
+                    height, width = frame.shape[:2]
+                    if width > height:
+                        portrait_width = max(1, round(height * 3 / 4))
+                        left = max(0, (width - portrait_width) // 2)
+                        frame = frame[:, left:left + portrait_width]
+                    frame = _trim_camera_letterbox(frame)
                 self.latest_frame.publish(frame)
                 if is_video:
                     next_frame_at += frame_period

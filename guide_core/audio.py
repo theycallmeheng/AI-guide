@@ -1,4 +1,4 @@
-"""Deterministic single-voice scheduler with 4-tier smart arbitration, earcons and stereo panning."""
+"""Single-voice scheduler with priority queuing, earcons and stereo panning."""
 from pathlib import Path
 import wave
 import numpy as np
@@ -6,13 +6,10 @@ from .types import Action, DIRECTIONAL, SIDE_GUIDANCE, SPEECH_PRIORITY
 
 CLIPS={a:a.value.lower()+".wav" for a in Action}
 
-# 4-Tier Survival & Cognitive Load Hierarchy (Strict Monotonic Priority: 4 > 3 > 2 > 1)
 ARBITRATION_TIER = {
-    Action.STOP: 4,          # Tier P4: Critical survival reflex ("Dừng lại.")
-    Action.SHIFT_LEFT: 3,    # Tier P3: Active lateral steering ("Lệch nhẹ sang trái.")
-    Action.SHIFT_RIGHT: 3,   # Tier P3: Active lateral steering ("Lệch nhẹ sang phải.")
-    Action.KEEP_HEADING: 2,  # Tier P2: Safe heading confirmation ("Giữ hướng, đi chậm.")
-    Action.SLOW: 1,          # Tier P1: Routine cautious status ("Đi chậm lại.")
+    **SPEECH_PRIORITY,
+    Action.KEEP_HEADING: 2,
+    Action.SLOW: 1,
     Action.UNCLEAR: 1,
 }
 
@@ -24,14 +21,6 @@ DEFAULT_ACTION_COOLDOWNS = {
     Action.KEEP_HEADING: 7.0,
     Action.SLOW: 7.5,
     Action.UNCLEAR: 8.5,
-}
-
-REVOCATION_REASONS = {
-    "previous_route_blocked",
-    "route_no_longer_confirmed",
-    "direction_changed_requires_confirmation",
-    "corridor_changed_requires_confirmation",
-    "traffic_on_candidate_ground",
 }
 
 def synthesize_earcon(rate=24000, kind="stop"):
@@ -90,12 +79,20 @@ class ClipBank:
                                     np.arange(len(audio)),audio)
                 self.clips[action]=audio.astype("<i2")
         self.extra={}
-        path=Path(directory)/"narrow.wav"
-        if path.is_file():
-            with wave.open(str(path),"rb") as f:
-                if f.getsampwidth()!=2 or f.getframerate()!=self.rate or f.getnchannels()!=1:
-                    raise ValueError("narrow.wav must be mono PCM16 at bank sample rate")
-                self.extra["narrow_corridor"]=np.frombuffer(f.readframes(f.getnframes()),dtype="<i2")
+        for reason, name in {
+            "narrow_corridor": "narrow",
+            "forward_corridor_blocked": "forward_corridor_blocked",
+            "transverse_step_ahead": "transverse_step_ahead",
+            "scan_for_bypass": "scan_for_bypass",
+            "bypass_left": "bypass_left",
+            "bypass_right": "bypass_right",
+        }.items():
+            path = Path(directory) / (name + ".wav")
+            if path.is_file():
+                with wave.open(str(path), "rb") as f:
+                    if f.getsampwidth()!=2 or f.getframerate()!=self.rate or f.getnchannels()!=1:
+                        raise ValueError(f"{path.name} must be mono PCM16 at bank sample rate")
+                    self.extra[reason] = np.frombuffer(f.readframes(f.getnframes()), dtype="<i2")
 
     def samples(self,decision):
         return self.extra.get(decision.reason,self.clips[decision.action])
@@ -121,11 +118,9 @@ class AudioTimeline:
         self.repeat_s=repeat_s
         self.sink=sink # Optional submit(samples, rate) / stop(); only live sinks log actual submission.
         self.smart_arbitration=bool(smart_arbitration)
-        self.preempt_emergency=bool(preempt_emergency or smart_arbitration)
+        self.preempt_emergency=bool(preempt_emergency)
         self.post_stop_hold_s=float(post_stop_hold_s) if self.smart_arbitration else 0.
         self.post_stop_turn_hold_s=float(min(post_stop_turn_hold_s,post_stop_hold_s)) if self.smart_arbitration else 0.
-        self.tail_grace_s=float(tail_grace_s) if self.smart_arbitration else 0.
-        self.revocation_debounce_frames=max(1,int(revocation_debounce_frames))
         self.action_cooldowns=dict(DEFAULT_ACTION_COOLDOWNS if action_cooldowns is None else action_cooldowns)
         self.earcon=bool(earcon)
         self.stereo=bool(stereo)
@@ -139,8 +134,21 @@ class AudioTimeline:
         self.last_side_started=None
         self.last_directional_started=None
         self.last_stop_ended_at=float("-inf")
-        self._contradiction_count=0
+        self.spoken_direction = None
         self.enabled=True
+
+    def direction_in_effect(self, now):
+        direction = self.spoken_direction
+        if direction is None or not self.enabled:
+            return None
+        still_speaking = (
+            self.active is not None
+            and self.active["decision"] is direction
+            and now < self.active["end"]
+        )
+        if still_speaking or now <= direction.valid_until:
+            return direction
+        return None
 
     def _log(self,event,now,decision,**extra):
         self.events.append(dict(event=event,time_s=now,action=decision.action.value,
@@ -160,7 +168,7 @@ class AudioTimeline:
         self._cancel(now,"stopped_or_muted")
         self.pending=None
         self.pending_since=None
-        self._contradiction_count=0
+        self.spoken_direction = None
         self.enabled=False
 
     def _finish_completed(self, now):
@@ -198,6 +206,8 @@ class AudioTimeline:
         action = decision.action
         if self._in_post_stop_hold(action, now):
             return False
+        if decision.reason == "scan_for_bypass":
+            return now - self.last_started.get("scan_for_bypass", float("-inf")) >= 8.5
         if action in SIDE_GUIDANCE and action != self.last_side_started:
             return True
         if self.smart_arbitration and action in DIRECTIONAL and action != self.last_directional_started:
@@ -223,6 +233,8 @@ class AudioTimeline:
                      "samples":samples,"pan":pan}
         self.segments.append(self.active)
         self.last_started[decision.action]=now
+        if decision.reason == "scan_for_bypass":
+            self.last_started["scan_for_bypass"] = now
         if decision.action in SIDE_GUIDANCE:
             self.last_side_started = decision.action
         if decision.action in DIRECTIONAL:
@@ -239,39 +251,12 @@ class AudioTimeline:
             self.sink.submit(out_samples,self.bank.rate)
             submission_ms=(time.perf_counter()-t)*1000
             event="submitted_to_device"
+        if decision.action in DIRECTIONAL:
+            self.spoken_direction = decision
+        elif decision.action == Action.STOP:
+            self.spoken_direction = None
         self._log(event,now,decision,queue_wait_s=max(0,now-(now if queued_at is None else queued_at)),
                   submission_ms=submission_ms,pan=pan)
-
-    def _should_preempt_active_direction(self, decision, now):
-        """Rule P3: Strict priority preemption — higher-tier lateral turns preempt lower-tier SLOW/UNCLEAR/KEEP_HEADING,
-        and opposite-side turns preempt contradicted turns; lower-tier SLOW/UNCLEAR NEVER cut active turns."""
-        if not self.smart_arbitration or self.active is None:
-            return None
-        active_action = self.active["decision"].action
-        if active_action == Action.STOP:
-            return None
-        remaining_s = self.active["end"] - now
-        if remaining_s <= self.tail_grace_s:
-            self._contradiction_count = 0
-            return None
-
-        new_action = decision.action
-        # Case 3a: Confirmed lateral turn (Tier 3) preempts lower-tier status speech (Tier 1 SLOW/UNCLEAR or Tier 2 KEEP_HEADING).
-        if new_action in SIDE_GUIDANCE and ARBITRATION_TIER.get(new_action, 1) > ARBITRATION_TIER.get(active_action, 1):
-            if self._can_start(decision, now):
-                self._contradiction_count = 0
-                return "preempted_by_priority_direction"
-            return None
-
-        # Case 3b: Confirmed lateral direction flipped to the opposite side (SHIFT_LEFT <-> SHIFT_RIGHT).
-        if active_action in SIDE_GUIDANCE and new_action in SIDE_GUIDANCE and new_action != active_action:
-            self._contradiction_count = 0
-            return "preempted_contradicted_direction"
-
-        # Lower-tier commands (SLOW / UNCLEAR / KEEP_HEADING) NEVER cut an active lateral turn (SHIFT_LEFT / SHIFT_RIGHT).
-        # Genuine hazards/route losses already emit Action.STOP (Tier 4), which preempts via Rule P4 above.
-        self._contradiction_count = 0
-        return None
 
     def update(self, decision, now):
         if not self.enabled:
@@ -290,65 +275,47 @@ class AudioTimeline:
             self._log("requested", now, decision)
         self.latest = decision
 
-        # Rule P4: Hard emergency preemption — STOP cuts any non-STOP speech immediately (0 ms),
-        # but NEVER cuts an already-playing STOP!
-        if (self.preempt_emergency and decision.action == Action.STOP
-                and self.active is not None and self.active["decision"].action != Action.STOP
-                and self._can_start(decision, now)):
-            self._contradiction_count = 0
-            self._cancel(now, "preempted_by_emergency_stop")
-            if self.pending is not None:
-                self._log("pending_replaced", now, self.pending)
-                self._clear_pending()
-            self._start(decision, now, now, earcon_kind="stop")
-            return
+        blocked_spoken_route = (
+            decision.action == Action.STOP and decision.reason == "spoken_route_blocked"
+        )
+        if blocked_spoken_route:
+            self.spoken_direction = None
+        if decision.action == Action.STOP and self.active is not None:
+            active_action = self.active["decision"].action
+            revoke = self.smart_arbitration and blocked_spoken_route and active_action in DIRECTIONAL
+            legacy_stop = (
+                not self.smart_arbitration and self.preempt_emergency
+                and active_action != Action.STOP and self._can_start(decision, now)
+            )
+            if revoke or legacy_stop:
+                reason = "preempted_revoked_direction" if revoke else "preempted_by_emergency_stop"
+                self._cancel(now, reason)
+                if self.pending is not None:
+                    self._log("pending_replaced", now, self.pending)
+                    self._clear_pending()
+                self._start(decision, now, now, earcon_kind="stop")
+                return
 
-        # Rule P3: Contradicted or revoked active direction preemption (respects tail_grace_s & debounce).
-        revoke_reason = self._should_preempt_active_direction(decision, now)
-        if revoke_reason is not None:
-            self._cancel(now, revoke_reason)
-            if self.pending is not None and self.pending.action != decision.action:
-                self._log("pending_replaced", now, self.pending)
-                self._clear_pending()
-            if self._can_start(decision, now):
-                kind = "revoke" if decision.action not in DIRECTIONAL else None
-                self._start(decision, now, now, earcon_kind=kind)
-            else:
-                self._queue(decision, now)
-            return
-
-        # Protected Single-Slot Mailbox for non-preempting updates while speaker is busy (or post-STOP hold).
+        # Keep just one pending utterance. A newer decision can revoke a queued route.
         if self.pending:
             pending = self.pending
             expired = pending.valid_until < now
-            confirming_same = (
-                self.smart_arbitration
-                and decision.reason in {"confirming_corridor", "waiting_context"}
-                and (decision.route is None or decision.route.action == pending.action)
-            )
             revoked = pending.frame_key[0] != decision.frame_key[0] or (
                 pending.action in DIRECTIONAL
-                and not confirming_same
                 and (pending.action != decision.action or decision.invalidates_route)
             )
+            priorities = ARBITRATION_TIER if self.smart_arbitration else SPEECH_PRIORITY
+            keep_pending = priorities.get(pending.action, 1) > priorities.get(decision.action, 1)
+            if not self.smart_arbitration and pending.action == Action.STOP and decision.action != Action.STOP:
+                keep_pending = True
             if expired or revoked:
                 self._log("expired" if expired else "pending_replaced", now, pending)
                 self._clear_pending()
-            elif self.smart_arbitration and ARBITRATION_TIER.get(pending.action, 1) > ARBITRATION_TIER.get(decision.action, 1):
-                # Higher survival/steering tier in mailbox cannot be displaced by ambient SLOW/UNCLEAR.
-                self.tick(now)
-                return
-            elif self.smart_arbitration and pending.action == Action.SLOW and decision.action == Action.UNCLEAR and pending.hazard_hint:
-                # Preserve specific obstacle hint (e.g. "xe máy bên trái") over generic UNCLEAR while waiting.
-                self.tick(now)
-                return
-            elif (SPEECH_PRIORITY.get(pending.action, 1) > SPEECH_PRIORITY.get(decision.action, 1)
-                  or (pending.action == Action.STOP and decision.action != Action.STOP)):
-                # Legacy/tier guard: routine update cannot displace a still-fresh STOP or priority peer.
+            elif keep_pending:
                 self.tick(now)
                 return
             elif pending.action != decision.action:
-                self._log("pending_replaced", now, pending)
+                self._log("pending_replaced", now, self.pending)
                 self._clear_pending()
 
         # In smart_arbitration, hold off queuing transient 0.4s pre-confirmation SLOW chatter so the

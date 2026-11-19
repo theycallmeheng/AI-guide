@@ -27,6 +27,12 @@ def collect_overlay_files() -> dict[str, dict[str, str]]:
         "requirements-guide-core.txt",
         "tools/check_guide_environment.py",
         "tools/compare_guide_models.py",
+        "assets/audio/guide_core/khanh_vy/manifest.json",
+        "assets/audio/guide_core/khanh_vy/forward_corridor_blocked.wav",
+        "assets/audio/guide_core/khanh_vy/transverse_step_ahead.wav",
+        "assets/audio/guide_core/khanh_vy/scan_for_bypass.wav",
+        "assets/audio/guide_core/khanh_vy/bypass_left.wav",
+        "assets/audio/guide_core/khanh_vy/bypass_right.wav",
     ):
         rels.append(Path(name))
 

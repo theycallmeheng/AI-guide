@@ -191,10 +191,23 @@ def urgent_reason(scene, ttc_stop_s=1.6, head_enabled=True, depth_enabled=True):
 def urgent(scene):
     return urgent_reason(scene)[0]
 
-def route_blocked(route,scene):
+
+def transverse_step_ahead(scene):
+    """Identify a step-like surface crossing nearly the whole view."""
+    h, w = scene.frame.bgr.shape[:2]
+    return any(
+        obj.label in {"stairs", "step"}
+        and obj.confidence >= .45
+        and obj.box[0] <= w * .12 and obj.box[2] >= w * .88
+        and obj.box[3] >= h * (.30 if h > w else .50)
+        and obj.box[3] - obj.box[1] >= h * .10
+        for obj in scene.detections
+    )
+
+def route_blocked(route,scene,horizon=.5):
     return bool(route and route.mask is not None and
                 route.mask.shape==scene.frame.bgr.shape[:2] and
-                np.any(route.mask & obstacle_mask(scene)))
+                np.any(route.mask & obstacle_mask(scene,horizon)))
 
 def _clock_from_shift(shift):
     if shift<-.20: return 10
@@ -316,7 +329,7 @@ class CorridorPlanner:
         self._prev_session=frame.session
         self._prev_pts=frame.pts
 
-        blocked|=obstacle_mask(scene,c.predict_horizon_s)
+        blocked |= obstacle_mask(scene,c.predict_horizon_s)
         walk_prob[blocked]=0.
         free=walk_prob>=c.semantic_threshold
 
@@ -370,6 +383,15 @@ class CorridorPlanner:
         reached_ratio=0. if top_y>=gh else float((gh-1-top_y)/max(1,gh-1))
         if top_y>max_confirm_row:
             why="short_corridor_ahead" if top_y<=int(gh*.62) else "no_continuous_corridor"
+            # Unknown pixels or insufficient width alone do not prove a blockage.
+            # Require object or depth evidence. Segmentation can mistake glossy floor for a wall.
+            observed_obstacles = obstacle_mask(scene, horizon=0.)
+            front = observed_obstacles[int(h*.40):int(h*.88), int(w*.12):int(w*.88)]
+            if front.size:
+                dense_rows = front.mean(axis=1) >= .9
+                band = max(1, round(h*.04))
+                if len(dense_rows) >= band and np.convolve(dense_rows, np.ones(band), mode="valid").max() >= band:
+                    why = "forward_corridor_blocked"
             return Route(None,states=states,reason=why,evidence_complete=True,horizon_ratio=reached_ratio)
 
         candidates=np.flatnonzero(np.isfinite(score[top_y]))

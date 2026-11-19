@@ -277,6 +277,8 @@ class CoreInferenceWorker(threading.Thread):
                     stereo=cfg.stereo_audio,
                 )
                 self.audio.enabled = self._sound_enabled
+                if cfg.smart_arbitration:
+                    engine.policy.spoken_direction = self.audio.direction_in_effect
 
             dev_summary = ", ".join(f"{a.spec.role}:{a.device}" for a in engine.adapters)
             self.events.put({
@@ -336,10 +338,6 @@ class CoreInferenceWorker(threading.Thread):
             with ThreadPoolExecutor(max_workers=2) as pool:
                 while not self.stop_event.is_set():
                     now = time.perf_counter()
-                    with self._audio_lock:
-                        if self.audio is not None and self._sound_enabled:
-                            self.audio.tick(now)
-
                     if detector_job is not None and detector_job[2].done():
                         frame, det_started, future = detector_job
                         detector_job = None
@@ -396,6 +394,10 @@ class CoreInferenceWorker(threading.Thread):
                                 last_context_seq = frame.sequence
                                 publish_decision(scene, dec, "fused")
                         later_scenes.clear()
+
+                    with self._audio_lock:
+                        if self.audio is not None and self._sound_enabled:
+                            self.audio.tick(time.perf_counter())
 
                     if detector_job is None:
                         new_seq, raw_bgr, closed, captured_at = self.latest_frame.next_after(sequence, timeout=0.015)

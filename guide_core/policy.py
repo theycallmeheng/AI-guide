@@ -1,5 +1,5 @@
-from .types import Action, Decision, DIRECTIONAL, SPEECH_PRIORITY
-from .planning import urgent_reason, route_blocked, _vi_label
+from .types import Action, Decision, DIRECTIONAL, SIDE_GUIDANCE, SPEECH_PRIORITY
+from .planning import urgent_reason, route_blocked, transverse_step_ahead, _vi_label
 from .fusion import is_hazard
 
 class DecisionPolicy:
@@ -12,6 +12,35 @@ class DecisionPolicy:
         self.last_key=None
         self.candidate_route=None
         self.last_pts=None
+        self.spoken_direction = None
+        self._step_observation = None
+        self._step_confirmed = False
+        self._blocked_view = None
+
+    def _looking_for_bypass(self, frame):
+        if self._blocked_view is None:
+            return False
+        session, pts = self._blocked_view
+        return frame.session == session and 0 <= frame.pts - pts <= 12.
+
+    def _step_ahead(self, scene):
+        """Require two distinct observations and tolerate short detector flicker."""
+        frame = scene.frame
+        last = self._step_observation
+        if last and last[0][0] == frame.session and frame.sequence < last[0][1]:
+            return self._step_confirmed
+        if not scene.observation_valid or scene.motion_invalid:
+            self._step_observation = None
+            self._step_confirmed = False
+            return False
+        if last and (last[0][0] != frame.session or frame.pts - last[1] > .35):
+            self._step_observation = last = None
+            self._step_confirmed = False
+        if transverse_step_ahead(scene):
+            if last and last[0] != frame.key:
+                self._step_confirmed = True
+            self._step_observation = (frame.key, frame.pts)
+        return self._step_confirmed
 
     @staticmethod
     def consistent(a,b,width):
@@ -63,6 +92,10 @@ class DecisionPolicy:
         return ", ".join(parts)
 
     def _emit(self,action,frame,clock,reason,route=None,hazard_hint=""):
+        if reason in {"transverse_step_ahead", "forward_corridor_blocked"}:
+            if (self._blocked_view is None or self._blocked_view[0] != frame.session
+                    or frame.pts > self._blocked_view[1]):
+                self._blocked_view = (frame.session, frame.pts)
         priority=SPEECH_PRIORITY.get(action,1)
         decision=Decision(action,clock,clock+self.c.max_age_s,frame.key,reason,route,priority,
                           invalidates_route=action == Action.STOP,hazard_hint=hazard_hint)
@@ -85,6 +118,15 @@ class DecisionPolicy:
         is_urg,urg_reason,urg_hint=urgent_reason(
             scene,self.c.ttc_stop_s,self.c.head_hazard_enabled,self.c.depth_obstacle_enabled
         )
+        step_ahead = self._step_ahead(scene) if self.c.environment in {"indoor", "auto"} else False
+        spoken = self.spoken_direction(clock) if self.spoken_direction else None
+        if (spoken and scene.observation_valid and not scene.motion_invalid
+                and spoken.frame_key[0] == frame.key[0] and spoken.frame_key[1] <= frame.key[1]
+                and route_blocked(spoken.route, scene, horizon=0.0)):
+            return self._emit(Action.STOP, frame, clock, "spoken_route_blocked", hazard_hint=urg_hint)
+        if step_ahead:
+            return self._emit(Action.STOP, frame, clock, "transverse_step_ahead",
+                              hazard_hint="có bậc hoặc mép bục phía trước")
         if is_urg:
             return self._emit(Action.STOP,frame,clock,urg_reason,hazard_hint=urg_hint)
         if not scene.observation_valid:
@@ -106,10 +148,17 @@ class DecisionPolicy:
             return self._emit(Action.SLOW if scene.detections else Action.UNCLEAR,frame,clock,"waiting_context",
                               hazard_hint=hint)
         if route is None or route.action is None or route.narrow:
+            if route and route.reason == "forward_corridor_blocked":
+                return self._emit(Action.STOP, frame, clock, route.reason, route,
+                                  hazard_hint="lối phía trước bị chắn")
             if previous and previous.action in DIRECTIONAL:
                 why="previous_route_blocked" if route_blocked(previous.route,scene) else "route_no_longer_confirmed"
                 return self._emit(Action.STOP,frame,clock,why,hazard_hint=self._nearest_hazard_hint(scene))
-            action=Action.SLOW if route and route.evidence_complete else Action.UNCLEAR
+            if route and route.evidence_complete and self._looking_for_bypass(frame):
+                return self._emit(Action.UNCLEAR, frame, clock, "scan_for_bypass", route,
+                                  "đứng yên, hướng camera sang hai bên để tìm lối vòng")
+            action = (Action.SLOW if route and route.evidence_complete
+                      and route.reason != "no_continuous_corridor" else Action.UNCLEAR)
             hint=self._nearest_hazard_hint(scene)
             return self._emit(action,frame,clock,route.reason if route else "context_unavailable",route,hint)
         gap=self.last_pts is not None and not 0<=frame.pts-self.last_pts<=self.c.max_age_s
@@ -124,5 +173,12 @@ class DecisionPolicy:
             self.last_key=frame.key
         steer_hint=self._steering_hint(scene,route)
         if self.count>=self.c.stable_observations and frame.pts-self.since>=self.c.stable_s-1e-8:
+            if route.action in SIDE_GUIDANCE and self._looking_for_bypass(frame):
+                left = route.action == Action.SHIFT_LEFT
+                reason = "bypass_left" if left else "bypass_right"
+                hint = "có lối vòng bên trái" if left else "có lối vòng bên phải"
+                return self._emit(route.action, frame, clock, reason, route, hint)
+            if route.action == Action.KEEP_HEADING:
+                self._blocked_view = None
             return self._emit(route.action,frame,clock,route.reason,route,steer_hint)
         return self._emit(Action.SLOW,frame,clock,"confirming_corridor",route,steer_hint)

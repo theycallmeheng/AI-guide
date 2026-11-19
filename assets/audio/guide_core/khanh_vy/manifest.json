@@ -8,6 +8,11 @@
     "keep_heading": "Giữ hướng, đi chậm.",
     "shift_left": "Lệch nhẹ sang trái.",
     "shift_right": "Lệch nhẹ sang phải.",
-    "narrow": "Lối đi hẹp. Đi chậm lại."
+    "narrow": "Lối đi hẹp. Đi chậm lại.",
+    "forward_corridor_blocked": "Dừng lại. Lối phía trước bị chắn.",
+    "transverse_step_ahead": "Dừng lại. Có bậc hoặc mép bục phía trước.",
+    "scan_for_bypass": "Đứng yên. Hướng camera sang hai bên để tìm lối vòng.",
+    "bypass_left": "Có lối vòng bên trái. Lệch nhẹ sang trái.",
+    "bypass_right": "Có lối vòng bên phải. Lệch nhẹ sang phải."
   }
 }

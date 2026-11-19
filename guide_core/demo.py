@@ -93,6 +93,8 @@ def run(config,video,output,seconds=None,progress=True):
     previous_image=None
     writer_fps=config.sample_fps
     origin=0.
+    if audio and config.smart_arbitration:
+        engine.policy.spoken_direction = lambda clock: audio.direction_in_effect(clock - origin)
     elapsed_start=time.perf_counter()
     stats={}
     deferred_renders=[]

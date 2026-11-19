@@ -13,6 +13,11 @@ def main():
     out.mkdir(parents=True,exist_ok=True)
     phrases={a.value.lower():text for a,text in MESSAGES.items()}
     phrases["narrow"]="Lối đi hẹp. Đi chậm lại."
+    phrases["forward_corridor_blocked"] = "Dừng lại. Lối phía trước bị chắn."
+    phrases["transverse_step_ahead"] = "Dừng lại. Có bậc hoặc mép bục phía trước."
+    phrases["scan_for_bypass"] = "Đứng yên. Hướng camera sang hai bên để tìm lối vòng."
+    phrases["bypass_left"] = "Có lối vòng bên trái. Lệch nhẹ sang trái."
+    phrases["bypass_right"] = "Có lối vòng bên phải. Lệch nhẹ sang phải."
     engine=None
     for name,text in phrases.items():
         path=out/(name+".wav")

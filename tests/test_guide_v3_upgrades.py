@@ -1,3 +1,4 @@
+from dataclasses import replace
 import tempfile
 import unittest
 import wave
@@ -257,27 +258,19 @@ class GuideV3UpgradeTests(unittest.TestCase):
         self.assertIsNotNone(audio.active)
         self.assertEqual(audio.active["decision"].action, Action.KEEP_HEADING)
 
-    def test_smart_arbitration_contradicted_side_and_tail_grace_window(self):
-        # 1. Opposite side before tail grace (>0.15s left): cuts immediately!
-        audio = AudioTimeline(Bank(1.0), smart_arbitration=True, tail_grace_s=0.15)
+    def test_smart_arbitration_replaces_queued_stop_with_latest_equal_priority_turn(self):
+        audio = AudioTimeline(Bank(1.0), smart_arbitration=True)
         audio.update(decision(Action.SHIFT_LEFT, 0.0), 0.0)
-        audio.update(decision(Action.SHIFT_RIGHT, 0.4), 0.4)
-        self.assertEqual(audio.segments[0]["end"], 0.4)
+        audio.update(decision(Action.STOP, 0.3, ttl=1.0), 0.3)
+        self.assertEqual(audio.pending.action, Action.STOP)
+        audio.update(decision(Action.SHIFT_RIGHT, 0.4, ttl=1.0), 0.4)
+        self.assertEqual(audio.pending.action, Action.SHIFT_RIGHT)
+        self.assertEqual(audio.active["decision"].action, Action.SHIFT_LEFT)
+        audio.tick(1.0)
         self.assertEqual(audio.active["decision"].action, Action.SHIFT_RIGHT)
-        self.assertEqual(audio.active["start"], 0.4)
-        self.assertTrue(any(e["event"] == "cancelled" and e["reason"] == "preempted_contradicted_direction" for e in audio.events))
+        self.assertEqual(audio.segments[0]["end"], 1.0)
 
-        # 2. Opposite side inside tail grace (<=0.15s left): finishes cleanly then plays!
-        audio2 = AudioTimeline(Bank(1.0), smart_arbitration=True, tail_grace_s=0.15)
-        audio2.update(decision(Action.SHIFT_LEFT, 0.0), 0.0)
-        audio2.update(decision(Action.SHIFT_RIGHT, 0.90), 0.90)  # Only 0.10s left!
-        self.assertEqual(audio2.active["decision"].action, Action.SHIFT_LEFT)
-        self.assertEqual(audio2.active["end"], 1.0)
-        audio2.tick(1.0)
-        self.assertEqual(audio2.active["decision"].action, Action.SHIFT_RIGHT)
-        self.assertEqual(audio2.active["start"], 1.0)
-
-    def test_smart_arbitration_strict_priority_turns_never_cut_by_slow_and_preempt_slow(self):
+    def test_smart_arbitration_finishes_turn_and_slow_before_playing_pending_turn(self):
         audio = AudioTimeline(Bank(1.0), smart_arbitration=True, revocation_debounce_frames=2, earcon=True)
         audio.update(decision(Action.SHIFT_LEFT, 0.0), 0.0)
         # Multiple consecutive SLOW / UNCLEAR frames MUST NEVER cut active SHIFT_LEFT ("Lệch nhẹ sang trái")!
@@ -291,12 +284,12 @@ class GuideV3UpgradeTests(unittest.TestCase):
         self.assertEqual(audio.active["decision"].action, Action.SLOW)
         slow_start = audio.active["start"]
 
-        # Conversely, while SLOW ("Đi chậm lại", Tier 1) IS playing, incoming SHIFT_RIGHT (Tier 3)
-        # MUST preempt SLOW immediately so turn guidance is never delayed!
-        audio.update(decision(Action.SHIFT_RIGHT, slow_start + 0.3), slow_start + 0.3)
+        audio.update(decision(Action.SHIFT_RIGHT, slow_start + 0.4), slow_start + 0.4)
+        self.assertEqual(audio.active["decision"].action, Action.SLOW)
+        self.assertEqual(audio.pending.action, Action.SHIFT_RIGHT)
+        audio.tick(audio.active["end"])
         self.assertEqual(audio.active["decision"].action, Action.SHIFT_RIGHT)
-        self.assertEqual(audio.active["start"], slow_start + 0.3)
-        self.assertTrue(any(e["event"] == "cancelled" and e["reason"] == "preempted_by_priority_direction" for e in audio.events))
+        self.assertFalse(any(e["event"] == "cancelled" for e in audio.events))
 
         # Asymmetric cooldown: UNCLEAR has 8.5s repeat cooldown, while delta direction change has 0s cooldown!
         end_sr = audio.active["end"]
@@ -364,7 +357,7 @@ class GuideV3UpgradeTests(unittest.TestCase):
         )
         # 1. Old SHIFT_LEFT starts at 0.0s and is cut by STOP at 0.25s; if no new turn arrives, old turn NEVER replays!
         audio.update(decision(Action.SHIFT_LEFT, 0.0, ttl=2.0), 0.0)
-        audio.update(decision(Action.STOP, 0.25, ttl=0.7), 0.25)
+        audio.update(replace(decision(Action.STOP, 0.25), reason="spoken_route_blocked"), 0.25)
         self.assertEqual(audio.active["decision"].action, Action.STOP)
         self.assertIsNone(audio.pending)
         audio.tick(1.25)  # STOP finishes at 1.25s
@@ -375,7 +368,7 @@ class GuideV3UpgradeTests(unittest.TestCase):
         # SHIFT_RIGHT arrives at 3.55s (default ttl=0.7 -> valid_until=4.25s).
         # With post_stop_turn_hold_s=0.3s, it deploys automatically at 3.8 + 0.3 = 4.10s (< 4.25s)!
         audio.update(decision(Action.SHIFT_RIGHT, 2.5), 2.5)
-        audio.update(decision(Action.STOP, 2.8), 2.8)
+        audio.update(replace(decision(Action.STOP, 2.8), reason="spoken_route_blocked"), 2.8)
         audio.update(decision(Action.SHIFT_RIGHT, 3.55, ttl=0.7), 3.55)
         audio.tick(3.80)  # STOP finishes at 3.80s
         audio.tick(4.00)

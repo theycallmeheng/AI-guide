@@ -44,6 +44,74 @@ class IdentityTracker:
     def update(self,s): return s
 
 class CoreTests(unittest.TestCase):
+    def test_bypass_waits_for_a_confirmed_side(self):
+        for action, reason in ((Action.SHIFT_LEFT, "bypass_left"), (Action.SHIFT_RIGHT, "bypass_right")):
+            with self.subTest(side=action):
+                policy = DecisionPolicy(config())
+                blocked = Route(None, reason="forward_corridor_blocked", evidence_complete=True)
+                self.assertEqual(policy.update(scene(0, 0), blocked, 0).action, Action.STOP)
+                obscured = Route(None, reason="no_continuous_corridor", evidence_complete=True)
+                scan = policy.update(scene(1, .1), obscured, .1)
+                self.assertEqual((scan.action, scan.reason), (Action.UNCLEAR, "scan_for_bypass"))
+                lateral = Route(action, evidence_complete=True)
+                for seq, t in ((2, .2), (3, .4)):
+                    self.assertNotEqual(policy.update(scene(seq,t), lateral, t).action, action)
+                confirmed = policy.update(scene(4, .6), lateral, .6)
+                self.assertEqual((confirmed.action, confirmed.reason), (action, reason))
+
+    def test_indoor_transverse_step_requires_two_distinct_frames(self):
+        cfg = config()
+        cfg.environment = "indoor"
+        policy = DecisionPolicy(cfg)
+        first = scene(1, .1)
+        first.detections = [Detection("stairs", .53, (0, 0, 320, 130), ("y",))]
+        self.assertNotEqual(policy.update(first, None, .1, full=False).action, Action.STOP)
+        self.assertNotEqual(policy.update(first, None, .15).action, Action.STOP)
+        second = scene(2, .2)
+        second.detections = first.detections.copy()
+        stop = policy.update(second, None, .2, full=False)
+        self.assertEqual((stop.action, stop.reason), (Action.STOP, "transverse_step_ahead"))
+        self.assertEqual(policy.update(scene(3, .3), None, .3, full=False).action, Action.STOP)
+        self.assertNotEqual(policy.update(scene(6, .6), None, .6, full=False).action, Action.STOP)
+
+    def test_confirmed_barrier_stops_but_unknown_ground_does_not(self):
+        cfg = config(depth=False)
+        planner, policy = CorridorPlanner(cfg), DecisionPolicy(cfg)
+        trial = scene()
+        trial.semantic["classes"][140:162, :] = 0
+        trial.detections = [Detection("chair", .85, (0, 140, 320, 162), ("y",))]
+        route = planner.plan(trial)
+        self.assertEqual(route.reason, "forward_corridor_blocked")
+        self.assertEqual(policy.update(trial, route, 0).action, Action.STOP)
+        trial.detections.clear()
+        route = planner.plan(trial)
+        self.assertNotEqual(route.reason, "forward_corridor_blocked")
+        self.assertNotEqual(policy.update(trial, route, .1).action, Action.STOP)
+        unknown = Route(None, reason="no_continuous_corridor", evidence_complete=True)
+        self.assertEqual(policy.update(trial, unknown, .2).action, Action.UNCLEAR)
+
+    def test_new_detection_revokes_spoken_route_during_confirmation(self):
+        audio = AudioTimeline(Bank(1.0), smart_arbitration=True)
+        policy = DecisionPolicy(config())
+        policy.spoken_direction = audio.direction_in_effect
+        mask = np.zeros((240, 320), dtype=bool)
+        mask[145:200, 250:300] = True
+        right = Route(Action.SHIFT_RIGHT, mask=mask)
+        spoken = replace(decision(Action.SHIFT_RIGHT), route=right)
+        audio.update(spoken, 0.0)
+
+        rechecking = policy.update(scene(2, .2), Route(Action.SHIFT_LEFT), .2)
+        self.assertEqual(rechecking.action, Action.SLOW)
+        audio.update(rechecking, .2)
+        crossing = scene(8, .8)
+        crossing.detections = [Detection("person", .9, (253, 145, 290, 190), ("y",))]
+        stop = policy.update(crossing, None, .8, full=False)
+        self.assertEqual(stop.reason, "spoken_route_blocked")
+        audio.update(stop, .8)
+        self.assertEqual(audio.segments[0]["end"], .8)
+        self.assertEqual(audio.active["decision"].action, Action.STOP)
+        self.assertEqual(audio.segments[1]["start"], .8)
+
     def test_cross_frame_fusion_rejected(self):
         f=frame()
         r=result(frame(1),"detector",[])

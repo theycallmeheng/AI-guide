@@ -69,7 +69,6 @@ def run_replay(engine,video,emit,tick,seconds=None,start=None):
         with ThreadPoolExecutor(max_workers=2) as pool:
             while True:
                 now=time.perf_counter()
-                tick(now-start)
                 if detector and detector[1].done():
                     frame,future=detector
                     results=future.result()
@@ -141,6 +140,7 @@ def run_replay(engine,video,emit,tick,seconds=None,start=None):
                     decision=engine.policy.stale(last_scene.frame,now,"no_fresh_camera_data")
                     emit(last_scene,decision,[],now-start,"watchdog")
                     last_stale_emit=now
+                tick(time.perf_counter()-start)
                 if done.is_set() and detector is None and context is None and slot.value is None:
                     break
                 time.sleep(.005)
